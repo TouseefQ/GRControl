@@ -1,0 +1,233 @@
+"""
+Scan sequence state machine.
+
+For each combination of (led_position, camera_position):
+  - Move both motors (optionally simultaneously)
+  - Wait for both MOVE_DONE events
+  - For each enabled LED:
+      1. Turn LED on
+      2. Capture image with metadata
+      3. Turn LED off
+  - Emit progress updates throughout
+
+The controller is decoupled from the WebSocket layer — it calls async
+callbacks that the main app wires up.
+"""
+import asyncio
+import logging
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Awaitable, Optional
+
+from ..models import ScanConfig, ScanProgress, EncoderState
+from ..esp32.protocol import (
+    cmd_move, cmd_stop, cmd_led_set, cmd_led_off_all
+)
+
+log = logging.getLogger(__name__)
+
+ProgressCallback = Callable[[ScanProgress], Awaitable[None]]
+ImageCallback = Callable[[str, bytes], Awaitable[None]]  # (path, jpeg_preview)
+
+
+class ScanController:
+    def __init__(self, esp32_conn, camera, settings):
+        self._esp = esp32_conn
+        self._camera = camera
+        self._settings = settings
+
+        self._progress = ScanProgress()
+        self._config: Optional[ScanConfig] = None
+        self._progress_cb: Optional[ProgressCallback] = None
+        self._image_cb: Optional[ImageCallback] = None
+
+        # Events signalled when MOVE_DONE arrives for each motor
+        self._move_done_motor1 = asyncio.Event()
+        self._move_done_motor2 = asyncio.Event()
+
+        # Current encoder readings, kept fresh from telemetry
+        self.current_encoder = EncoderState()
+
+        self._task: Optional[asyncio.Task] = None
+
+    def set_progress_callback(self, cb: ProgressCallback):
+        self._progress_cb = cb
+
+    def set_image_callback(self, cb: ImageCallback):
+        self._image_cb = cb
+
+    # ── Called by the ESP32 connection dispatcher ─────────────────────────────
+
+    async def on_esp32_message(self, msg: dict):
+        mtype = msg.get("type")
+        if mtype == "STATE":
+            self.current_encoder.motor1_deg = msg.get("enc_motor1_deg", 0.0)
+            self.current_encoder.motor2_deg = msg.get("enc_motor2_deg", 0.0)
+            self.current_encoder.led_arc_deg = msg.get("enc_led_arc_deg", 0.0)
+            self.current_encoder.camera_deg = msg.get("enc_camera_deg", 0.0)
+        elif mtype == "MOVE_DONE":
+            motor = msg.get("motor")
+            if motor == 1:
+                self._move_done_motor1.set()
+            elif motor == 2:
+                self._move_done_motor2.set()
+
+    # ── Public control ────────────────────────────────────────────────────────
+
+    async def start(self, config: ScanConfig) -> bool:
+        if self._progress.running:
+            log.warning("Scan already running")
+            return False
+        self._config = config
+        self._task = asyncio.create_task(self._run_scan())
+        return True
+
+    async def pause(self):
+        if self._progress.running:
+            self._progress.paused = True
+            await self._esp.send_raw(cmd_stop(0))
+            await self._emit_progress()
+
+    async def resume(self):
+        self._progress.paused = False
+        await self._emit_progress()
+
+    async def abort(self):
+        if self._task:
+            self._task.cancel()
+        await self._esp.send_raw(cmd_stop(0))
+        await self._esp.send_raw(cmd_led_off_all())
+        self._progress.running = False
+        self._progress.paused = False
+        await self._emit_progress()
+
+    # ── Scan state machine ────────────────────────────────────────────────────
+
+    async def _run_scan(self):
+        cfg = self._config
+        led_positions = cfg.led_axis.positions
+        cam_positions = cfg.camera_axis.positions
+        active_leds = [i for i, en in enumerate(cfg.led_pattern.enabled) if en]
+
+        total = len(led_positions) * len(cam_positions) * len(active_leds)
+        self._progress = ScanProgress(
+            running=True,
+            total_positions=total,
+            current_position=0,
+            images_captured=0,
+        )
+        await self._emit_progress()
+
+        # Ensure output folder exists
+        Path(cfg.output_folder).mkdir(parents=True, exist_ok=True)
+
+        try:
+            for led_pos in led_positions:
+                for cam_pos in cam_positions:
+                    # Pause check
+                    while self._progress.paused:
+                        await asyncio.sleep(0.1)
+
+                    # Move motors
+                    await self._move_to(led_pos, cam_pos, cfg)
+
+                    # Per-LED capture
+                    for led_idx in active_leds:
+                        while self._progress.paused:
+                            await asyncio.sleep(0.1)
+
+                        brightness = cfg.led_pattern.brightness[led_idx]
+
+                        # Turn on LED
+                        await self._esp.send_raw(
+                            cmd_led_set(led_idx, 1, brightness)
+                        )
+                        await asyncio.sleep(0.05)  # settle time
+
+                        # Capture
+                        filename = self._make_filename(
+                            cfg.output_folder, led_pos, cam_pos, led_idx, cfg.image_format
+                        )
+                        metadata = self._make_metadata(led_pos, cam_pos, led_idx, brightness)
+                        saved_path = await self._camera.capture(
+                            filename, cfg.image_format, metadata
+                        )
+
+                        # Turn LED off
+                        await self._esp.send_raw(cmd_led_set(led_idx, 0, 0))
+
+                        if saved_path:
+                            self._progress.images_captured += 1
+                            if self._image_cb:
+                                preview = await self._camera.grab_preview_jpeg()
+                                if preview:
+                                    await self._image_cb(saved_path, preview)
+                        else:
+                            self._progress.errors.append(
+                                f"Capture failed at LED={led_pos}° CAM={cam_pos}° LED#{led_idx}"
+                            )
+
+                        self._progress.current_position += 1
+                        self._progress.current_led_pos_deg = led_pos
+                        self._progress.current_cam_pos_deg = cam_pos
+                        self._progress.current_led_index = led_idx
+                        await self._emit_progress()
+
+        except asyncio.CancelledError:
+            log.info("Scan aborted")
+        except Exception as e:
+            log.error("Scan error: %s", e)
+            self._progress.errors.append(str(e))
+        finally:
+            await self._esp.send_raw(cmd_led_off_all())
+            self._progress.running = False
+            self._progress.paused = False
+            await self._emit_progress()
+
+    async def _move_to(self, led_pos: float, cam_pos: float, cfg: ScanConfig):
+        self._move_done_motor1.clear()
+        self._move_done_motor2.clear()
+
+        move1 = self._esp.send_raw(cmd_move(1, led_pos, cfg.led_axis.speed_pct))
+        move2 = self._esp.send_raw(cmd_move(2, cam_pos, cfg.camera_axis.speed_pct))
+
+        if cfg.move_simultaneously:
+            await asyncio.gather(move1, move2)
+        else:
+            await move1
+            await asyncio.wait_for(self._move_done_motor1.wait(), timeout=30)
+            await move2
+
+        # Wait for both motion-complete signals (or timeout after 30 s each)
+        await asyncio.gather(
+            asyncio.wait_for(self._move_done_motor1.wait(), timeout=30),
+            asyncio.wait_for(self._move_done_motor2.wait(), timeout=30),
+        )
+
+    def _make_filename(self, folder: str, led_pos: float, cam_pos: float,
+                       led_idx: int, fmt: str) -> str:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        name = (f"LED_{led_pos:07.3f}deg_CAM_{cam_pos:07.3f}deg"
+                f"_LED{led_idx:02d}_{timestamp}.{fmt}")
+        return os.path.join(folder, name)
+
+    def _make_metadata(self, led_pos: float, cam_pos: float,
+                       led_idx: int, brightness: int) -> dict:
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "led_target_deg": led_pos,
+            "camera_target_deg": cam_pos,
+            "led_index": led_idx,
+            "led_brightness": brightness,
+            "encoder_motor1_deg": self.current_encoder.motor1_deg,
+            "encoder_motor2_deg": self.current_encoder.motor2_deg,
+            "encoder_led_arc_deg": self.current_encoder.led_arc_deg,
+            "encoder_camera_deg": self.current_encoder.camera_deg,
+            "encoder_led_error_deg": self.current_encoder.led_error_deg,
+            "encoder_camera_error_deg": self.current_encoder.camera_error_deg,
+        }
+
+    async def _emit_progress(self):
+        if self._progress_cb:
+            await self._progress_cb(self._progress)

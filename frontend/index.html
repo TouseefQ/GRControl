@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GRControl — Gonioreflectometer</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ── Top bar ──────────────────────────────────────────────────────── -->
+  <header id="topbar">
+    <span class="logo">GRControl</span>
+
+    <div class="status-pill" id="conn-pill">
+      <svg id="conn-led" width="12" height="12" viewBox="0 0 12 12">
+        <circle cx="6" cy="6" r="5" fill="#ef4444" stroke="#00000033" stroke-width="1"/>
+        <circle cx="4" cy="4" r="1.5" fill="white" opacity="0.4"/>
+      </svg>
+      <span id="conn-label">Disconnected</span>
+    </div>
+
+    <div class="status-pill" id="cam-pill">
+      <svg id="cam-led" width="12" height="12" viewBox="0 0 12 12">
+        <circle cx="6" cy="6" r="5" fill="#ef4444" stroke="#00000033" stroke-width="1"/>
+        <circle cx="4" cy="4" r="1.5" fill="white" opacity="0.4"/>
+      </svg>
+      <span id="cam-label">Camera off</span>
+    </div>
+
+    <div class="status-pill" id="scan-pill" style="display:none">
+      <svg width="12" height="12" viewBox="0 0 12 12">
+        <circle cx="6" cy="6" r="5" fill="#f59e0b" stroke="#00000033" stroke-width="1"/>
+        <circle cx="4" cy="4" r="1.5" fill="white" opacity="0.4"/>
+      </svg>
+      <span id="scan-pill-label">Scanning…</span>
+    </div>
+
+    <div class="spacer"></div>
+
+    <button id="btn-theme" title="Toggle light / dark theme">🌙</button>
+    <button class="btn btn-danger btn-sm" id="btn-estop">⬛ E-STOP</button>
+  </header>
+
+  <!-- ── Sidebar ──────────────────────────────────────────────────────── -->
+  <aside id="sidebar">
+
+    <!-- Connection -->
+    <div class="sidebar-section">
+      <div class="sidebar-header" data-target="sec-connection">
+        Connection <span>▾</span>
+      </div>
+      <div class="sidebar-body" id="sec-connection">
+        <div class="tabs">
+          <div class="tab active" data-tab="tab-serial">Serial</div>
+          <div class="tab" data-tab="tab-tcp">WiFi / TCP</div>
+        </div>
+
+        <div class="tab-panel active" id="tab-serial">
+          <div class="field">
+            <label>Serial Port</label>
+            <select id="serial-port-select">
+              <option value="">— refresh to list —</option>
+            </select>
+          </div>
+          <button class="btn btn-secondary btn-sm full-width" id="btn-refresh-ports">↻ Refresh ports</button>
+          <button class="btn btn-primary full-width" id="btn-connect-serial">Connect</button>
+        </div>
+
+        <div class="tab-panel" id="tab-tcp">
+          <div class="field">
+            <label>ESP32 IP Address</label>
+            <input type="text" id="tcp-host" placeholder="192.168.1.100" />
+          </div>
+          <button class="btn btn-primary full-width" id="btn-connect-tcp">Connect</button>
+        </div>
+
+        <button class="btn btn-danger btn-sm full-width hidden" id="btn-disconnect">Disconnect</button>
+      </div>
+    </div>
+
+    <!-- Home / Reference -->
+    <div class="sidebar-section">
+      <div class="sidebar-header" data-target="sec-home">
+        Reference / Home <span>▾</span>
+      </div>
+      <div class="sidebar-body" id="sec-home">
+        <p class="text-dim" style="font-size:12px;">
+          Manually position the device to the desired zero reference, then set home.
+        </p>
+        <button class="btn btn-secondary full-width" id="btn-home-both">Set Home (Both)</button>
+        <div class="btn-row">
+          <button class="btn btn-secondary" style="flex:1" id="btn-home-led">Home LED</button>
+          <button class="btn btn-secondary" style="flex:1" id="btn-home-cam">Home Camera</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Log -->
+    <div class="sidebar-section" style="flex:1">
+      <div class="sidebar-header" data-target="sec-log">
+        Log <span>▾</span>
+      </div>
+      <div class="sidebar-body" id="sec-log">
+        <div id="log-list"></div>
+        <button class="btn btn-secondary btn-sm" id="btn-clear-log">Clear</button>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- ── Main content ──────────────────────────────────────────────────── -->
+  <main id="main">
+
+    <!-- 1. Encoder dashboard -->
+    <div class="card">
+      <div class="card-title">Encoder Readings</div>
+      <div class="encoder-grid">
+        <div class="encoder-box">
+          <div class="encoder-label">Motor 1 — LED Arc (AS5600)</div>
+          <div class="encoder-value" id="enc-motor1">—<span>°</span></div>
+        </div>
+        <div class="encoder-box">
+          <div class="encoder-label">LED Arc Final (AS5600)</div>
+          <div class="encoder-value" id="enc-led-arc">—<span>°</span></div>
+        </div>
+        <div class="encoder-box">
+          <div class="encoder-label">Motor 2 — Camera (AS5600)</div>
+          <div class="encoder-value" id="enc-motor2">—<span>°</span></div>
+        </div>
+        <div class="encoder-box">
+          <div class="encoder-label">Camera Final (AksIM-4)</div>
+          <div class="encoder-value" id="enc-camera">—<span>°</span></div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:10px;">
+        <div class="error-row" style="flex:1">
+          <span class="text-dim">LED Arc Error</span>
+          <span class="error-value" id="err-led">—</span>
+        </div>
+        <div class="error-row" style="flex:1">
+          <span class="text-dim">Camera Error</span>
+          <span class="error-value" id="err-cam">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. Camera Control -->
+    <div class="card">
+      <div class="card-title">Camera Control</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--gap);align-items:start;">
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <button class="btn btn-primary full-width" id="btn-cam-open">Open Camera</button>
+          <button class="btn btn-danger btn-sm full-width hidden" id="btn-cam-close">Close Camera</button>
+          <div class="field">
+            <label>Exposure (µs)</label>
+            <input type="number" id="cam-exposure" value="10000" min="10" max="1000000" step="100" />
+          </div>
+          <div class="field">
+            <label>Gain</label>
+            <input type="number" id="cam-gain" value="1.0" min="1" max="10" step="0.1" />
+          </div>
+          <button class="btn btn-secondary btn-sm full-width" id="btn-cam-settings">Apply Settings</button>
+          <div class="field">
+            <label>Image Format</label>
+            <select id="img-format">
+              <option value="tiff">TIFF</option>
+              <option value="png">PNG</option>
+              <option value="jpeg">JPEG</option>
+              <option value="bmp">BMP</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Output Folder</label>
+            <input type="text" id="output-folder" value="./captures" />
+          </div>
+        </div>
+        <div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <span style="font-size:12px;color:var(--text-dim);">Live Preview</span>
+            <button class="btn btn-secondary btn-sm" id="btn-preview-refresh">↻ Refresh</button>
+          </div>
+          <div id="camera-preview-wrap">
+            <span id="camera-placeholder">Camera not open</span>
+            <img id="camera-preview" class="hidden" alt="Camera preview" />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. Camera Control -->
+    <div class="card">
+      <div class="card-title">Scan Configuration</div>
+
+      <div class="scan-axis-grid">
+        <!-- LED axis -->
+        <div>
+          <label style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px;display:block;">LED Arc Axis</label>
+          <div class="field-row">
+            <div class="field"><label>Start (°)</label><input type="number" id="scan-led-start" value="0" min="0" max="360" /></div>
+            <div class="field"><label>Stop (°)</label><input type="number" id="scan-led-stop" value="180" min="0" max="360" /></div>
+            <div class="field"><label>Step (°)</label><input type="number" id="scan-led-step" value="10" min="0.1" max="360" step="0.1" /></div>
+          </div>
+          <div class="field mt-8">
+            <label>Speed (%): <span id="scan-led-speed-val">80</span></label>
+            <input type="range" id="scan-led-speed" min="1" max="100" value="80" />
+          </div>
+        </div>
+
+        <!-- Camera axis -->
+        <div>
+          <label style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px;display:block;">Camera Axis</label>
+          <div class="field-row">
+            <div class="field"><label>Start (°)</label><input type="number" id="scan-cam-start" value="0" min="0" max="360" /></div>
+            <div class="field"><label>Stop (°)</label><input type="number" id="scan-cam-stop" value="90" min="0" max="360" /></div>
+            <div class="field"><label>Step (°)</label><input type="number" id="scan-cam-step" value="10" min="0.1" max="360" step="0.1" /></div>
+          </div>
+          <div class="field mt-8">
+            <label>Speed (%): <span id="scan-cam-speed-val">80</span></label>
+            <input type="range" id="scan-cam-speed" min="1" max="100" value="80" />
+          </div>
+        </div>
+      </div>
+
+      <!-- LED pattern -->
+      <div class="mt-8">
+        <label style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px;display:block;">LEDs Active During Scan</label>
+        <div id="scan-led-pattern" style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px;"></div>
+      </div>
+
+      <!-- Options -->
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;">
+        <label class="inline-label">
+          <input type="checkbox" id="scan-simultaneous" checked />
+          Move both motors simultaneously
+        </label>
+      </div>
+
+      <!-- Position count -->
+      <div style="margin-top:12px;font-size:12px;color:var(--text-dim);">
+        Estimated positions: <span id="scan-pos-count" style="color:var(--text);font-weight:600;">—</span> &nbsp;|&nbsp;
+        Total captures: <span id="scan-img-count" style="color:var(--text);font-weight:600;">—</span>
+      </div>
+
+      <div class="btn-row mt-8">
+        <button class="btn btn-success" id="btn-scan-start">▶ Start Scan</button>
+        <button class="btn btn-secondary hidden" id="btn-scan-pause">⏸ Pause</button>
+        <button class="btn btn-secondary hidden" id="btn-scan-resume">▶ Resume</button>
+        <button class="btn btn-danger hidden" id="btn-scan-abort">⬛ Abort</button>
+      </div>
+    </div>
+
+    <!-- Scan progress (shown only while scanning) -->
+    <div class="card" id="scan-progress-card" style="display:none;">
+      <div class="card-title">Scan Progress</div>
+
+      <div class="progress-bar-wrap">
+        <div class="progress-bar-fill" id="scan-progress-fill" style="width:0%"></div>
+      </div>
+
+      <div style="display:flex;justify-content:space-between;margin-top:8px;font-size:12px;color:var(--text-dim);">
+        <span id="scan-progress-text">0 / 0</span>
+        <span id="scan-images-text">0 images</span>
+      </div>
+
+      <div style="margin-top:8px;font-size:12px;display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+        <div class="error-row">
+          <span class="text-dim">LED Arc</span>
+          <span id="scan-cur-led">—</span>
+        </div>
+        <div class="error-row">
+          <span class="text-dim">Camera</span>
+          <span id="scan-cur-cam">—</span>
+        </div>
+      </div>
+
+      <div id="scan-errors" class="hidden" style="margin-top:10px;color:var(--red);font-size:12px;"></div>
+    </div>
+
+    <!-- 5. Captured Images -->
+    <div class="card">
+      <div class="card-title" style="display:flex;justify-content:space-between;align-items:center;">
+        Captured Images
+        <button class="btn btn-secondary btn-sm" id="btn-clear-gallery">Clear</button>
+      </div>
+      <div id="gallery-empty" class="text-dim" style="font-size:12px;">No images captured yet.</div>
+      <div id="gallery-grid"></div>
+    </div>
+
+    <!-- 6. Manual Motor Control -->
+    <div class="card">
+      <div class="card-title">Manual Motor Control</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--gap)">
+
+        <!-- Motor 1 -->
+        <div class="motor-row">
+          <label style="font-size:13px;font-weight:600;color:var(--text);">
+            Motor 1 — LED Arc
+            <span id="m1-moving-badge" class="hidden" style="color:var(--yellow);font-size:11px;margin-left:6px;">● MOVING</span>
+          </label>
+
+          <!-- Jog -->
+          <label style="margin-top:4px;">Jog — steps</label>
+          <div class="jog-row">
+            <input type="number" id="jog1-steps" value="100" min="1" max="10000" title="Number of microsteps" />
+          </div>
+          <label style="margin-top:2px;">Jog speed (%): <span id="jog1-speed-val">30</span></label>
+          <input type="range" id="jog1-speed" min="1" max="100" value="30" />
+          <div class="btn-row mt-8" style="gap:6px;">
+            <button class="btn btn-secondary" style="flex:1" data-motor="1" data-dir="-1">◀ CCW</button>
+            <button class="btn btn-secondary" style="flex:1" data-motor="1" data-dir="1">CW ▶</button>
+          </div>
+
+          <!-- Move to angle -->
+          <label style="margin-top:10px;">Move to absolute angle</label>
+          <div class="move-row">
+            <input type="number" id="move1-angle" value="0" min="0" max="360" step="0.1" />
+            <button class="btn btn-primary btn-sm" id="btn-move1">Go</button>
+          </div>
+          <label style="margin-top:2px;">Move speed (%): <span id="move1-speed-val">80</span></label>
+          <input type="range" id="move1-speed" min="1" max="100" value="80" />
+
+          <button class="btn btn-danger btn-sm mt-8" id="btn-stop1">⬛ Stop Motor 1</button>
+        </div>
+
+        <!-- Motor 2 -->
+        <div class="motor-row">
+          <label style="font-size:13px;font-weight:600;color:var(--text);">
+            Motor 2 — Camera
+            <span id="m2-moving-badge" class="hidden" style="color:var(--yellow);font-size:11px;margin-left:6px;">● MOVING</span>
+          </label>
+
+          <!-- Jog -->
+          <label style="margin-top:4px;">Jog — steps</label>
+          <div class="jog-row">
+            <input type="number" id="jog2-steps" value="100" min="1" max="10000" title="Number of microsteps" />
+          </div>
+          <label style="margin-top:2px;">Jog speed (%): <span id="jog2-speed-val">30</span></label>
+          <input type="range" id="jog2-speed" min="1" max="100" value="30" />
+          <div class="btn-row mt-8" style="gap:6px;">
+            <button class="btn btn-secondary" style="flex:1" data-motor="2" data-dir="-1">◀ CCW</button>
+            <button class="btn btn-secondary" style="flex:1" data-motor="2" data-dir="1">CW ▶</button>
+          </div>
+
+          <!-- Move to angle -->
+          <label style="margin-top:10px;">Move to absolute angle</label>
+          <div class="move-row">
+            <input type="number" id="move2-angle" value="0" min="0" max="360" step="0.1" />
+            <button class="btn btn-primary btn-sm" id="btn-move2">Go</button>
+          </div>
+          <label style="margin-top:2px;">Move speed (%): <span id="move2-speed-val">80</span></label>
+          <input type="range" id="move2-speed" min="1" max="100" value="80" />
+
+          <button class="btn btn-danger btn-sm mt-8" id="btn-stop2">⬛ Stop Motor 2</button>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- 7. LED Control -->
+    <div class="card">
+      <div class="card-title">LED Control</div>
+      <div class="led-grid" id="led-grid">
+        <!-- Populated by JS -->
+      </div>
+      <div class="btn-row mt-8">
+        <button class="btn btn-secondary btn-sm" id="btn-led-all-on">All On</button>
+        <button class="btn btn-secondary btn-sm" id="btn-led-all-off">All Off</button>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- Image lightbox -->
+<div id="lightbox" style="display:none;position:fixed;inset:0;background:#000c;z-index:999;align-items:center;justify-content:center;flex-direction:column;gap:12px;">
+  <img id="lightbox-img" style="max-width:90vw;max-height:80vh;object-fit:contain;border-radius:8px;" />
+  <div id="lightbox-caption" style="color:#fff;font-size:12px;opacity:0.7;"></div>
+  <button class="btn btn-secondary" id="btn-lightbox-close">Close</button>
+</div>
+
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

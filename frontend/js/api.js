@@ -1,0 +1,128 @@
+/**
+ * api.js — thin wrappers around the FastAPI REST endpoints
+ */
+
+const BASE = "";  // same origin
+
+export async function getPorts() {
+  const r = await fetch(`${BASE}/api/ports`);
+  return r.json();
+}
+
+export async function connectSerial(port) {
+  const r = await fetch(`${BASE}/api/connect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: "serial", port }),
+  });
+  if (!r.ok) throw new Error((await r.json()).detail);
+  return r.json();
+}
+
+export async function connectTCP(host) {
+  const r = await fetch(`${BASE}/api/connect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: "tcp", host }),
+  });
+  if (!r.ok) throw new Error((await r.json()).detail);
+  return r.json();
+}
+
+export async function disconnect() {
+  const r = await fetch(`${BASE}/api/disconnect`, { method: "POST" });
+  return r.json();
+}
+
+export async function motorMove(motor, angle, speed) {
+  await fetch(`${BASE}/api/motor/move`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ motor, angle, speed }),
+  });
+}
+
+export async function motorJog(motor, direction, steps, speed) {
+  await fetch(`${BASE}/api/motor/jog`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ motor, direction, steps, speed }),
+  });
+}
+
+export async function motorStop(motor) {
+  await fetch(`${BASE}/api/motor/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ motor }),
+  });
+}
+
+export async function motorHome(motor) {
+  await fetch(`${BASE}/api/motor/home`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ motor }),
+  });
+}
+
+export async function ledSet(index, state, brightness) {
+  await fetch(`${BASE}/api/led/set`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ index, state, brightness }),
+  });
+}
+
+export async function ledAll(states, brightness) {
+  await fetch(`${BASE}/api/led/all`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ states, brightness }),
+  });
+}
+
+export async function ledOff() {
+  await fetch(`${BASE}/api/led/off`, { method: "POST" });
+}
+
+export async function cameraOpen() {
+  const r = await fetch(`${BASE}/api/camera/open`, { method: "POST" });
+  if (!r.ok) throw new Error((await r.json()).detail);
+  return r.json();
+}
+
+export async function cameraClose() {
+  await fetch(`${BASE}/api/camera/close`, { method: "POST" });
+}
+
+export async function cameraSettings(exposure_us, gain) {
+  const r = await fetch(`${BASE}/api/camera/settings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ exposure_us, gain }),
+  });
+  return r.json();
+}
+
+export async function scanStart(config) {
+  const r = await fetch(`${BASE}/api/scan/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  if (!r.ok) throw new Error((await r.json()).detail);
+  return r.json();
+}
+
+export async function scanPause() {
+  await fetch(`${BASE}/api/scan/pause`, { method: "POST" });
+}
+
+export async function scanResume() {
+  await fetch(`${BASE}/api/scan/resume`, { method: "POST" });
+}
+
+export async function scanAbort() {
+  await fetch(`${BASE}/api/scan/abort`, { method: "POST" });
+}
