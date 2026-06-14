@@ -162,6 +162,14 @@ python run.py
 
 Then open **http://localhost:8000** in your browser.
 
+### Windows notes
+
+The instructions above work on Windows without any changes. A couple of things to be aware of:
+
+- **Serial port names** — on Windows, ports are listed as `COM3`, `COM4`, etc. instead of `/dev/cu.*`. Use the **Refresh ports** button in the Connection panel to list them.
+- **IDS Peak SDK** — download and install the Windows version from the [IDS website](https://en.ids-imaging.com/ids-peak.html) before running the software. The camera will not open without it, but the rest of the software (motor control, scan config, UI) works fine without it.
+- **Firewall** — if using WiFi/TCP mode, allow Python through the Windows Firewall when prompted on first launch.
+
 ---
 
 ## User Guide
