@@ -57,6 +57,77 @@ GRControlSoftware/
 
 ---
 
+## Software Architecture
+
+```mermaid
+flowchart TB
+    subgraph Browser["🌐 Browser (http://localhost:8000)"]
+        direction TB
+        UI["index.html\nUI Layout"]
+        AppJS["app.js\nUI Logic & Event Handling"]
+        ApiJS["api.js\nREST Client"]
+        WsJS["ws.js\nWebSocket Client"]
+        LogJS["log.js\nEvent Log"]
+        UI --> AppJS
+        AppJS --> ApiJS
+        AppJS --> WsJS
+        AppJS --> LogJS
+    end
+
+    subgraph Backend["🐍 FastAPI Backend (Python)"]
+        direction TB
+        Main["main.py\nFastAPI App\nREST endpoints\nWebSocket hub"]
+        Models["models.py\nPydantic Models\nEncoder error calc"]
+        subgraph ESP32Layer["ESP32 Layer"]
+            Conn["connection.py\nSerial + TCP\nmanager"]
+            Proto["protocol.py\nJSON encoder/\ndecoder"]
+        end
+        subgraph CameraLayer["Camera Layer"]
+            Cam["ids_peak.py\nIDS Peak SDK\nwrapper (async)"]
+        end
+        subgraph ScanLayer["Scan Layer"]
+            Ctrl["controller.py\nScan state\nmachine"]
+        end
+        Main --> Models
+        Main --> Conn
+        Main --> Cam
+        Main --> Ctrl
+        Conn --> Proto
+        Ctrl --> Conn
+        Ctrl --> Cam
+    end
+
+    subgraph ESP32["⚙️ ESP32 (Firmware)"]
+        direction TB
+        FW["Firmware\n(user-written)"]
+        subgraph Encoders["Encoders"]
+            E1["AS5600 #1\nMotor 1 shaft\n(I2C)"]
+            E2["AS5600 #2\nMotor 2 shaft\n(I2C)"]
+            E3["AS5600 #3\nLED Arc output\n(I2C)"]
+            E4["AksIM-4\nCamera gear\n(BiSS-C/SPI)"]
+        end
+        subgraph Actuators["Actuators"]
+            M1["Motor 1\nLED Arc\n(PoStep60-256)"]
+            M2["Motor 2\nCamera\n(PoStep60-256)"]
+            LEDs["LED Strip\n7× LEDs\n(PCA9685)"]
+        end
+        FW --> E1 & E2 & E3 & E4
+        FW --> M1 & M2 & LEDs
+    end
+
+    subgraph Camera["📷 IDS Camera"]
+        HW["U3-34L0XCP\nUSB 3"]
+    end
+
+    ApiJS -- "HTTP REST\n(FastAPI routes)" --> Main
+    WsJS -- "WebSocket /ws\n(real-time telemetry)" --> Main
+    Conn -- "JSON+newline\nUSB Serial\n115200 baud" --> FW
+    Conn -- "JSON+newline\nTCP port 8888\n(WiFi)" --> FW
+    Cam -- "IDS Peak SDK\nUSB 3" --> HW
+```
+
+---
+
 ## Requirements
 
 - Python 3.9 or newer
