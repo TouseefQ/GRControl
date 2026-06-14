@@ -170,6 +170,19 @@ The instructions above work on Windows without any changes. A couple of things t
 - **IDS Peak SDK** — download and install the Windows version from the [IDS website](https://en.ids-imaging.com/ids-peak.html) before running the software. The camera will not open without it, but the rest of the software (motor control, scan config, UI) works fine without it.
 - **Firewall** — if using WiFi/TCP mode, allow Python through the Windows Firewall when prompted on first launch.
 
+### Linux notes
+
+The instructions above work on Linux without any changes. One common gotcha:
+
+- **Serial port permissions** — on Linux, serial ports (`/dev/ttyUSB0`, `/dev/ttyACM0`) require the user to be in the `dialout` group. If you get a "Permission denied" error when connecting, run this once and then log out and back in:
+
+  ```bash
+  sudo usermod -aG dialout $USER
+  ```
+
+- **IDS Peak SDK** — download and install the Linux version from the [IDS website](https://en.ids-imaging.com/ids-peak.html).
+- **Serial port names** — ports appear as `/dev/ttyUSB0` or `/dev/ttyACM0`. Use the **Refresh ports** button to list them.
+
 ---
 
 ## User Guide
