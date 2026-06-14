@@ -182,6 +182,14 @@ The instructions above work on Linux without any changes. One common gotcha:
 
 - **IDS Peak SDK** — download and install the Linux version from the [IDS website](https://en.ids-imaging.com/ids-peak.html).
 - **Serial port names** — ports appear as `/dev/ttyUSB0` or `/dev/ttyACM0`. Use the **Refresh ports** button to list them.
+- **`python` vs `python3`** — on Debian/Ubuntu based distros the `python` command may not exist. Use `python3` to create the venv; once activated, `python` and `pip` work normally inside it:
+
+  ```bash
+  python3 -m venv .venv
+  source .venv/bin/activate
+  pip install -r requirements.txt
+  python run.py
+  ```
 
 ---
 
