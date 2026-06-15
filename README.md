@@ -233,6 +233,10 @@ Power Management disabled — see [`scripts/fix_usb_lpm.sh`](scripts/fix_usb_lpm
 > Cockpit** before starting GRControl (and vice-versa), or GRControl will report
 > "Camera open failed".
 
+For the full diagnosis behind these steps (symptoms, how each cause was isolated,
+and the application-level fixes), see
+[`docs/linux-camera-troubleshooting.md`](docs/linux-camera-troubleshooting.md).
+
 ---
 
 ## User Guide
