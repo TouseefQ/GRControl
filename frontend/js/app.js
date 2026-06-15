@@ -311,6 +311,7 @@ function setCameraOpen(info) {
 }
 
 function setCameraClosed() {
+  stopLive();
   setLedColor(camLed, "#ef4444", null);
   camLabel.textContent = "Camera off";
   document.getElementById("btn-cam-open").classList.remove("hidden");
@@ -343,7 +344,36 @@ document.getElementById("btn-cam-settings").addEventListener("click", async () =
   logOk(`Camera settings: exposure=${exp}µs gain=${gain}`);
 });
 
+// ── Live preview (MJPEG stream) ───────────────────────────────────────────────
+let liveOn = false;
+
+function stopLive() {
+  if (!liveOn) return;
+  liveOn = false;
+  const img = document.getElementById("camera-preview");
+  img.onerror = null;
+  img.src = "";   // closing the <img> connection ends the backend MJPEG stream
+  document.getElementById("btn-preview-live").textContent = "▶ Live";
+}
+
+function startLive() {
+  const img = document.getElementById("camera-preview");
+  const ph  = document.getElementById("camera-placeholder");
+  liveOn = true;
+  img.onerror = () => { if (liveOn) { logWarn("Live preview unavailable"); stopLive(); } };
+  img.src = "/api/camera/stream?t=" + Date.now();
+  img.classList.remove("hidden");
+  ph.classList.add("hidden");
+  document.getElementById("btn-preview-live").textContent = "⏸ Stop";
+  logOk("Live preview started");
+}
+
+document.getElementById("btn-preview-live").addEventListener("click", () => {
+  if (liveOn) stopLive(); else startLive();
+});
+
 document.getElementById("btn-preview-refresh").addEventListener("click", async () => {
+  stopLive();  // single snapshot and live stream share the same <img>
   const img = document.getElementById("camera-preview");
   const ph  = document.getElementById("camera-placeholder");
   try {

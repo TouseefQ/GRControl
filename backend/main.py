@@ -33,7 +33,7 @@ from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .models import Settings, ScanConfig, DeviceState, EncoderState
@@ -331,6 +331,41 @@ async def camera_preview():
         raise HTTPException(503, "Preview not available")
     from fastapi.responses import Response
     return Response(content=jpeg, media_type="image/jpeg")
+
+
+_preview_stream_lock = asyncio.Lock()
+
+
+@app.get("/api/camera/stream")
+async def camera_stream():
+    """MJPEG live preview (multipart/x-mixed-replace) for a browser <img>.
+    One consumer at a time; pauses while a scan runs so it never competes with
+    scan capture for camera buffers. The stream ends when the camera closes or
+    the client disconnects."""
+    if not camera.is_open:
+        raise HTTPException(503, "Camera not open")
+    if _preview_stream_lock.locked():
+        raise HTTPException(409, "Live preview already active")
+
+    async def gen():
+        async with _preview_stream_lock:
+            while camera.is_open:
+                if scan_ctrl._progress.running:
+                    await asyncio.sleep(0.2)  # yield the camera to the scan
+                    continue
+                jpeg = await camera.grab_preview_jpeg()
+                if not jpeg:
+                    await asyncio.sleep(0.1)
+                    continue
+                yield (
+                    b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                    + str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n"
+                )
+                await asyncio.sleep(0.04)  # cap rate; real fps limited by grab cost
+
+    return StreamingResponse(
+        gen(), media_type="multipart/x-mixed-replace; boundary=frame"
+    )
 
 
 # ── REST: Scan ────────────────────────────────────────────────────────────────
