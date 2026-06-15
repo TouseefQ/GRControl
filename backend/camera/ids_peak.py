@@ -34,17 +34,91 @@ class IDSCamera:
         self._open = False
         self._ids_peak = None
         self._ids_ipl = None
+        self._ids_ipl_ext = None
+
+    @staticmethod
+    def _ensure_gentl_path():
+        """The IDS peak GenTL producers (.cti) are located via the
+        GENICAM_GENTL64_PATH environment variable. The pip wheels do not
+        bundle them, so if the variable is unset, point it at the producers
+        from a system IDS peak install."""
+        if os.environ.get("GENICAM_GENTL64_PATH"):
+            return
+        candidates = [
+            "/usr/local/lib/x86_64-linux-gnu/ids-peak/cti",
+            "/usr/lib/x86_64-linux-gnu/ids-peak/cti",
+            "/opt/ids-peak/lib/ids-peak/cti",
+        ]
+        for d in candidates:
+            if any(Path(d).glob("*.cti")) if Path(d).is_dir() else False:
+                os.environ["GENICAM_GENTL64_PATH"] = d
+                log.info("Set GENICAM_GENTL64_PATH=%s", d)
+                return
+        log.warning("No IDS GenTL producers (.cti) found — set GENICAM_GENTL64_PATH manually")
 
     def _load_sdk(self):
+        self._ensure_gentl_path()
         try:
-            import ids_peak
-            import ids_peak_ipl as ids_ipl
+            # The IDS peak Python API exposes its symbols on submodules of the
+            # same name (e.g. ids_peak.Library lives in ids_peak.ids_peak),
+            # so the binding must be imported as `from <pkg> import <pkg>`.
+            # ids_peak_ipl_extension provides BufferToImage, which wraps a raw
+            # acquisition buffer as an IPL image we can convert and save.
+            from ids_peak import ids_peak
+            from ids_peak_ipl import ids_peak_ipl
+            from ids_peak import ids_peak_ipl_extension
             self._ids_peak = ids_peak
-            self._ids_ipl = ids_ipl
+            self._ids_ipl = ids_peak_ipl
+            self._ids_ipl_ext = ids_peak_ipl_extension
             return True
         except ImportError:
             log.warning("ids_peak SDK not found — camera features disabled")
             return False
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _buffer_to_color_image(self, raw_buffer):
+        """Wrap a finished acquisition buffer as an IPL image, convert it to
+        BGRa8 (a new image with its own memory), then requeue the buffer."""
+        ipl = self._ids_ipl
+        image = self._ids_ipl_ext.BufferToImage(raw_buffer)
+        # ConvertTo(format, mode) returns a freshly-allocated image, so it is
+        # safe to requeue the underlying buffer immediately afterwards.
+        converted = image.ConvertTo(ipl.PixelFormatName_BGRa8, ipl.ConversionMode_Fast)
+        self._data_stream.QueueBuffer(raw_buffer)
+        return converted
+
+    @staticmethod
+    def _ipl_to_numpy(image):
+        """Return the IPL image pixels as a NumPy array, tolerant of the exact
+        accessor name across SDK versions (get_numpy_3D / get_numpy / ...)."""
+        for name in ("get_numpy_3D", "get_numpy_2D", "get_numpy", "get_numpy_1D"):
+            fn = getattr(image, name, None)
+            if fn is not None:
+                return fn()
+        raise RuntimeError("IPL image has no known NumPy accessor")
+
+    def _save_image(self, image, output_path: str, fmt: str):
+        """Save an IPL image. JPG/PNG/BMP are written natively by the SDK
+        (format inferred from the file extension); TIFF (and any format the
+        SDK cannot write) falls back to Pillow."""
+        ipl = self._ids_ipl
+        fmt = fmt.lower()
+        if fmt in ("jpeg", "jpg"):
+            ipl.ImageWriter.WriteAsJPG(output_path, image)
+        elif fmt == "png":
+            ipl.ImageWriter.WriteAsPNG(output_path, image)
+        elif fmt == "bmp":
+            ipl.ImageWriter.WriteAsBMP(output_path, image)
+        else:
+            # TIFF (and anything the SDK's ImageWriter can't produce) → Pillow.
+            # The image is BGRa8, and the IPL converter does not support a
+            # BGRa8→RGB8 conversion, so reorder channels in NumPy instead.
+            from PIL import Image as PILImage
+            arr = self._ipl_to_numpy(image)
+            if arr.ndim == 3 and arr.shape[2] in (3, 4):
+                arr = arr[..., [2, 1, 0]]  # BGR(A) → RGB, dropping alpha
+            PILImage.fromarray(arr).save(output_path)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -60,13 +134,25 @@ class IDSCamera:
         )
         self._node_map = self._device.RemoteDevice().NodeMaps()[0]
         self._data_stream = self._device.DataStreams()[0].OpenDataStream()
+
+        # Free-running acquisition (no external/software trigger).
+        try:
+            self._node_map.FindNode("TriggerMode").SetCurrentEntry("Off")
+        except Exception:
+            pass
+
         payload_size = self._node_map.FindNode("PayloadSize").Value()
         for _ in range(self._data_stream.NumBuffersAnnouncedMinRequired()):
             buf = self._data_stream.AllocAndAnnounceBuffer(payload_size)
             self._data_stream.QueueBuffer(buf)
-        self._data_stream.StartAcquisition()
+
+        # Order matters (per IDS peak samples): lock the parameters, start the
+        # host-side stream, then start the device acquisition and wait for the
+        # command to complete.
         self._node_map.FindNode("TLParamsLocked").SetValue(1)
+        self._data_stream.StartAcquisition()
         self._node_map.FindNode("AcquisitionStart").Execute()
+        self._node_map.FindNode("AcquisitionStart").WaitUntilDone()
         self._open = True
         log.info("IDS camera opened: %s", self._device.SerialNumber())
 
@@ -102,18 +188,8 @@ class IDSCamera:
     # ── Capture ───────────────────────────────────────────────────────────────
 
     def _capture_frame(self, output_path: str, image_format: str, metadata: dict) -> str:
-        peak = self._ids_peak
-        ipl = self._ids_ipl
-
-        buffer = self._data_stream.WaitForFinishedBuffer(5000)
-        ipl_image = ipl.Image.CreateFromSizeAndFormat(
-            buffer.Width(), buffer.Height(), ipl.PixelFormatName_BGRa8
-        )
-        ipl_image.ConvertTo(
-            ipl.PixelFormatName_BGRa8,
-            ipl.ConversionMode_Fast
-        )
-        self._data_stream.QueueBuffer(buffer)
+        raw_buffer = self._data_stream.WaitForFinishedBuffer(5000)
+        ipl_image = self._buffer_to_color_image(raw_buffer)
 
         fmt = image_format.lower()
         if fmt not in ("tiff", "png", "bmp", "jpeg", "jpg"):
@@ -123,14 +199,7 @@ class IDSCamera:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         # Save image
-        if fmt == "tiff":
-            ipl_image.Save(str(path), ipl.ImageFileFormat_Tiff)
-        elif fmt == "png":
-            ipl_image.Save(str(path), ipl.ImageFileFormat_Png)
-        elif fmt in ("jpeg", "jpg"):
-            ipl_image.Save(str(path), ipl.ImageFileFormat_Jpeg)
-        elif fmt == "bmp":
-            ipl_image.Save(str(path), ipl.ImageFileFormat_Bmp)
+        self._save_image(ipl_image, str(path), fmt)
 
         # Save sidecar metadata JSON
         meta_path = path.with_suffix(".json")
@@ -161,28 +230,27 @@ class IDSCamera:
 
     def _grab_preview_jpeg(self) -> Optional[bytes]:
         try:
-            peak = self._ids_peak
             ipl = self._ids_ipl
-            buffer = self._data_stream.WaitForFinishedBuffer(2000)
-            ipl_image = ipl.Image.CreateFromSizeAndFormat(
-                buffer.Width(), buffer.Height(), ipl.PixelFormatName_BGRa8
-            )
-            ipl_image.ConvertTo(ipl.PixelFormatName_BGRa8, ipl.ConversionMode_Fast)
-            self._data_stream.QueueBuffer(buffer)
+            raw_buffer = self._data_stream.WaitForFinishedBuffer(2000)
+            width = raw_buffer.Width()
+            ipl_image = self._buffer_to_color_image(raw_buffer)
 
-            # Scale down to 640px wide for preview
-            scale = 640.0 / buffer.Width()
-            w = int(buffer.Width() * scale)
-            h = int(buffer.Height() * scale)
-            small = ipl_image.Scale(w, h)
+            # Scale down to ~640px wide for preview. Scale() takes scale
+            # *factors* (not pixel dimensions), the same factor on both axes
+            # to preserve aspect ratio.
+            factor = 640.0 / width if width else 1.0
+            small = ipl_image.Scale(factor, factor) if factor < 1.0 else ipl_image
 
-            import tempfile, base64
+            import tempfile
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                small.Save(tmp.name, ipl.ImageFileFormat_Jpeg)
                 tmp_path = tmp.name
-            with open(tmp_path, "rb") as f:
-                data = f.read()
-            os.unlink(tmp_path)
+            try:
+                ipl.ImageWriter.WriteAsJPG(tmp_path, small)
+                with open(tmp_path, "rb") as f:
+                    data = f.read()
+            finally:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
             return data
         except Exception as e:
             log.warning("Preview grab failed: %s", e)
