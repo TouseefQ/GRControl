@@ -157,6 +157,8 @@ class IDSCamera:
         log.info("IDS camera opened: %s", self._device.SerialNumber())
 
     async def open(self) -> bool:
+        if self._open:
+            return True  # already open; opening again would fail (single-process device)
         if not self._load_sdk():
             return False
         try:
@@ -232,14 +234,20 @@ class IDSCamera:
         try:
             ipl = self._ids_ipl
             raw_buffer = self._data_stream.WaitForFinishedBuffer(2000)
-            width = raw_buffer.Width()
             ipl_image = self._buffer_to_color_image(raw_buffer)
 
-            # Scale down to ~640px wide for preview. Scale() takes scale
-            # *factors* (not pixel dimensions), the same factor on both axes
-            # to preserve aspect ratio.
-            factor = 640.0 / width if width else 1.0
-            small = ipl_image.Scale(factor, factor) if factor < 1.0 else ipl_image
+            # Scale down to ~640px wide for preview. IPL's Scale() takes a
+            # Size2D of target *pixel dimensions* (not scale factors); Size2D
+            # is built via its settable width/height properties.
+            PREVIEW_W = 640
+            src_w, src_h = ipl_image.Width(), ipl_image.Height()
+            if src_w > PREVIEW_W:
+                size = ipl.Size2D()
+                size.width = PREVIEW_W
+                size.height = max(1, round(src_h * PREVIEW_W / src_w))
+                small = ipl_image.Scale(size)
+            else:
+                small = ipl_image
 
             import tempfile
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
@@ -260,6 +268,10 @@ class IDSCamera:
         if not self._open:
             return None
         return await asyncio.get_event_loop().run_in_executor(_executor, self._grab_preview_jpeg)
+
+    @property
+    def is_open(self) -> bool:
+        return self._open
 
     # ── Properties (node map accessors) ──────────────────────────────────────
 

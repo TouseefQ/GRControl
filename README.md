@@ -180,7 +180,7 @@ The instructions above work on Linux without any changes. One common gotcha:
   sudo usermod -aG dialout $USER
   ```
 
-- **IDS Peak SDK** — download and install the Linux version from the [IDS website](https://en.ids-imaging.com/ids-peak.html).
+- **IDS Peak SDK** — download and install the Linux version from the [IDS website](https://en.ids-imaging.com/ids-peak.html). The camera is a **USB3 Vision** model, so the plain "IDS peak" package (U3V Transport Layer) is correct — you do **not** need the "with uEye Transport Layer" package or the IDS Software Suite (those are only for legacy UI-model uEye cameras).
 - **Serial port names** — ports appear as `/dev/ttyUSB0` or `/dev/ttyACM0`. Use the **Refresh ports** button to list them.
 - **`python` vs `python3`** — on Debian/Ubuntu based distros the `python` command may not exist, and `venv` is a separate package. Run these once before creating the venv:
 
@@ -196,6 +196,42 @@ The instructions above work on Linux without any changes. One common gotcha:
   pip install -r requirements.txt
   python run.py
   ```
+
+#### Camera setup on Linux (required for the IDS USB3 camera)
+
+On a fresh Linux install the camera enumerates over USB but shows **no image**
+until two system settings are applied. Symptoms: it appears in `lsusb` but
+Cockpit/GRControl show nothing, or the camera opens but acquisition times out
+with no frames. Both steps below are needed.
+
+1. **Install the IDS udev rule** so a non-root user can open the camera. The IDS
+   archive ships the rule but does not activate it:
+
+   ```bash
+   sudo /usr/local/share/ids-peak/scripts/ids_install_udev_rule.sh
+   ```
+
+   Then **unplug and replug** the camera. Without this the device is visible in
+   `lsusb` but cannot be opened (access denied).
+
+2. **Raise the USB transfer buffer limit.** The default (and a literal `0`) starves
+   the large USB3 transfers, so the camera opens but delivers zero frames. Add
+   `usbcore.usbfs_memory_mb=1000` to the kernel command line:
+
+   ```bash
+   sudo sed -i 's/\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 usbcore.usbfs_memory_mb=1000"/' /etc/default/grub
+   sudo update-grub
+   sudo reboot
+   ```
+
+   (To test without rebooting first: `echo 1000 | sudo tee /sys/module/usbcore/parameters/usbfs_memory_mb`.)
+
+If the camera still drops out *while streaming*, some hosts also need USB Link
+Power Management disabled — see [`scripts/fix_usb_lpm.sh`](scripts/fix_usb_lpm.sh).
+
+> **Note:** only one program can open the camera at a time. Close **IDS peak
+> Cockpit** before starting GRControl (and vice-versa), or GRControl will report
+> "Camera open failed".
 
 ---
 
