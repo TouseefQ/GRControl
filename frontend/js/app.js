@@ -176,10 +176,13 @@ on("state", (msg) => {
   document.getElementById("m1-moving-badge").classList.toggle("hidden", !msg.motor1_moving);
   document.getElementById("m2-moving-badge").classList.toggle("hidden", !msg.motor2_moving);
 
-  // Sync LED button states
   if (msg.led_states) {
     msg.led_states.forEach((st, i) => {
-      document.getElementById(`led-btn-${i}`)?.classList.toggle("on", st === 1);
+      const btn = document.getElementById(`led-btn-${i}`);
+      if (btn) {
+        ledStates[i] = st;
+        btn.classList.toggle("on", st === 1);
+      }
     });
   }
 });
@@ -467,7 +470,7 @@ document.getElementById("btn-scan-start").addEventListener("click", async () => 
   const enabledLeds  = Array.from({ length: 7 }, (_, i) =>
     document.getElementById(`scan-led-${i}`)?.checked ?? true
   );
-  const ledBrights   = Array.from({ length: 7 }, () => 200); // fixed at 200 for scan
+  const ledBrights   = Array.from({ length: 7 }, () => 200);
 
   const config = {
     led_axis: {

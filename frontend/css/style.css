@@ -281,7 +281,7 @@ body {
 }
 
 .led-brightness {
-  width: 36px;
+  width: 72px;
   -webkit-appearance: none;
   appearance: none;
   height: 4px;
@@ -289,6 +289,7 @@ body {
   background: var(--border);
   outline: none;
   cursor: pointer;
+  margin: 6px 0;
 }
 
 .led-brightness::-webkit-slider-thumb {
