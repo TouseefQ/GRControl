@@ -157,17 +157,28 @@ function errorClass(deg) {
 on("state", (msg) => {
   document.getElementById("enc-motor1").innerHTML = `${fmt(msg.enc_motor1_deg)}<span>°</span>`;
   document.getElementById("enc-motor2").innerHTML = `${fmt(msg.enc_motor2_deg)}<span>°</span>`;
-  document.getElementById("enc-led-arc").innerHTML = `${fmt(msg.enc_led_arc_deg)}<span>°</span>`;
-  document.getElementById("enc-camera").innerHTML = `${fmt(msg.enc_camera_deg)}<span>°</span>`;
+
+  const ledArcVal = msg.enc_led_arc_deg;
+  const camVal    = msg.enc_camera_deg;
+  document.getElementById("enc-led-arc").innerHTML =
+    ledArcVal == null ? `<span class="no-encoder">—</span>` : `${fmt(ledArcVal)}<span>°</span>`;
+  document.getElementById("enc-camera").innerHTML =
+    camVal == null ? `<span class="no-encoder">—</span>` : `${fmt(camVal)}<span>°</span>`;
 
   const errLedEl = document.getElementById("err-led");
   const errCamEl = document.getElementById("err-cam");
 
-  if (typeof msg.led_error_deg === "number") {
+  if (ledArcVal == null) {
+    errLedEl.textContent = "—";
+    errLedEl.className = "error-value";
+  } else if (typeof msg.led_error_deg === "number") {
     errLedEl.textContent = `${msg.led_error_deg >= 0 ? "+" : ""}${msg.led_error_deg.toFixed(4)}°`;
     errLedEl.className = `error-value ${errorClass(msg.led_error_deg)}`;
   }
-  if (typeof msg.camera_error_deg === "number") {
+  if (camVal == null) {
+    errCamEl.textContent = "—";
+    errCamEl.className = "error-value";
+  } else if (typeof msg.camera_error_deg === "number") {
     errCamEl.textContent = `${msg.camera_error_deg >= 0 ? "+" : ""}${msg.camera_error_deg.toFixed(4)}°`;
     errCamEl.className = `error-value ${errorClass(msg.camera_error_deg)}`;
   }
@@ -175,6 +186,12 @@ on("state", (msg) => {
   // Motor moving badges
   document.getElementById("m1-moving-badge").classList.toggle("hidden", !msg.motor1_moving);
   document.getElementById("m2-moving-badge").classList.toggle("hidden", !msg.motor2_moving);
+
+  // Direction flip toggles
+  const flip1 = document.getElementById("dir-flip-1");
+  const flip2 = document.getElementById("dir-flip-2");
+  if (flip1 && msg.dir_flip_1 !== undefined) flip1.checked = msg.dir_flip_1;
+  if (flip2 && msg.dir_flip_2 !== undefined) flip2.checked = msg.dir_flip_2;
 
   if (msg.led_states) {
     msg.led_states.forEach((st, i) => {
@@ -200,12 +217,12 @@ document.querySelectorAll("[data-motor][data-dir]").forEach(btn => {
   btn.addEventListener("click", async () => {
     const motor = parseInt(btn.dataset.motor);
     const dir   = parseInt(btn.dataset.dir);
-    const stepsEl = document.getElementById(`jog${motor}-steps`);
+    const degEl = document.getElementById(`jog${motor}-deg`);
     const speedEl = document.getElementById(`jog${motor}-speed`);
-    const steps = parseInt(stepsEl?.value) || 100;
+    const degrees = parseFloat(degEl?.value) || 1.0;
     const speed = parseInt(speedEl?.value) || 30;
-    await api.motorJog(motor, dir, steps, speed);
-    log(`Jog motor ${motor} dir=${dir} steps=${steps}`);
+    await api.motorJog(motor, dir, degrees, speed);
+    log(`Jog motor ${motor} dir=${dir} ${degrees}°`);
   });
 });
 
@@ -247,10 +264,20 @@ document.getElementById("btn-home-both").addEventListener("click", async () => {
   await api.motorHome(0); logOk("Home set for both motors");
 });
 document.getElementById("btn-home-led").addEventListener("click", async () => {
-  await api.motorHome(1); logOk("Home set for LED arc motor");
+  await api.motorHome(2); logOk("Home set for LED arc motor");
 });
 document.getElementById("btn-home-cam").addEventListener("click", async () => {
-  await api.motorHome(2); logOk("Home set for camera motor");
+  await api.motorHome(1); logOk("Home set for camera motor");
+});
+
+// ── Direction flip toggles ────────────────────────────────────────────────────
+document.getElementById("dir-flip-1")?.addEventListener("change", async (e) => {
+  await api.setConfig(e.target.checked, undefined);
+  logOk(`Motor 1 direction ${e.target.checked ? "flipped" : "normal"}`);
+});
+document.getElementById("dir-flip-2")?.addEventListener("change", async (e) => {
+  await api.setConfig(undefined, e.target.checked);
+  logOk(`Motor 2 direction ${e.target.checked ? "flipped" : "normal"}`);
 });
 
 // ── LED controls ──────────────────────────────────────────────────────────────

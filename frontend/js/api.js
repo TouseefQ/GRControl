@@ -42,11 +42,23 @@ export async function motorMove(motor, angle, speed) {
   });
 }
 
-export async function motorJog(motor, direction, steps, speed) {
+export async function motorJog(motor, direction, degrees, speed) {
   await fetch(`${BASE}/api/motor/jog`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ motor, direction, steps, speed }),
+    body: JSON.stringify({ motor, direction, degrees, speed }),
+  });
+}
+
+export async function setConfig(dir_flip_1, dir_flip_2, max_speed_sps) {
+  const body = {};
+  if (dir_flip_1 !== undefined) body.dir_flip_1 = dir_flip_1;
+  if (dir_flip_2 !== undefined) body.dir_flip_2 = dir_flip_2;
+  if (max_speed_sps !== undefined) body.max_speed_sps = max_speed_sps;
+  await fetch(`${BASE}/api/motor/config`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
 }
 

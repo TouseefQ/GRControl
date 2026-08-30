@@ -40,7 +40,7 @@ from .models import Settings, ScanConfig, DeviceState, EncoderState
 from .esp32.connection import ESP32Connection, list_serial_ports
 from .esp32.protocol import (
     cmd_move, cmd_jog, cmd_stop, cmd_set_home,
-    cmd_led_set, cmd_led_all, cmd_led_off_all,
+    cmd_led_set, cmd_led_all, cmd_led_off_all, cmd_set_config,
 )
 from .camera.ids_peak import IDSCamera
 from .scan.controller import ScanController
@@ -88,13 +88,17 @@ async def _on_esp32_message(msg: dict):
     if mtype == "STATE":
         device_state.encoder.motor1_deg = msg.get("enc_motor1_deg", 0.0)
         device_state.encoder.motor2_deg = msg.get("enc_motor2_deg", 0.0)
-        device_state.encoder.led_arc_deg = msg.get("enc_led_arc_deg", 0.0)
-        device_state.encoder.camera_deg = msg.get("enc_camera_deg", 0.0)
+        device_state.encoder.led_arc_deg = msg.get("enc_led_arc_deg")
+        device_state.encoder.camera_deg = msg.get("enc_camera_deg")
+        device_state.encoder.cmd_camera_deg = msg.get("cmd_camera_deg")
+        device_state.encoder.cmd_led_deg = msg.get("cmd_led_deg")
         device_state.motor1_moving = msg.get("motor1_moving", False)
         device_state.motor2_moving = msg.get("motor2_moving", False)
         device_state.led_states = msg.get("led_states", [0] * 7)
         device_state.led_brightness = msg.get("led_brightness", [0] * 7)
         device_state.ts = msg.get("ts", 0)
+        device_state.dir_flip_1 = msg.get("dir_flip_1", False)
+        device_state.dir_flip_2 = msg.get("dir_flip_2", False)
 
         await _broadcast({
             "event": "state",
@@ -102,6 +106,8 @@ async def _on_esp32_message(msg: dict):
             "enc_motor2_deg": device_state.encoder.motor2_deg,
             "enc_led_arc_deg": device_state.encoder.led_arc_deg,
             "enc_camera_deg": device_state.encoder.camera_deg,
+            "cmd_camera_deg": device_state.encoder.cmd_camera_deg,
+            "cmd_led_deg": device_state.encoder.cmd_led_deg,
             "led_error_deg": device_state.encoder.led_error_deg,
             "camera_error_deg": device_state.encoder.camera_error_deg,
             "motor1_moving": device_state.motor1_moving,
@@ -109,6 +115,8 @@ async def _on_esp32_message(msg: dict):
             "led_states": device_state.led_states,
             "led_brightness": device_state.led_brightness,
             "ts": device_state.ts,
+            "dir_flip_1": device_state.dir_flip_1,
+            "dir_flip_2": device_state.dir_flip_2,
         })
 
     elif mtype == "MOVE_DONE":
@@ -219,7 +227,7 @@ class MoveRequest(BaseModel):
 class JogRequest(BaseModel):
     motor: int
     direction: int
-    steps: int
+    degrees: float
     speed: int = 30
 
 
@@ -231,6 +239,12 @@ class HomeRequest(BaseModel):
     motor: int = 0
 
 
+class ConfigRequest(BaseModel):
+    dir_flip_1: Optional[bool] = None
+    dir_flip_2: Optional[bool] = None
+    max_speed_sps: Optional[float] = None
+
+
 @app.post("/api/motor/move")
 async def motor_move(req: MoveRequest):
     await esp32.send_raw(cmd_move(req.motor, req.angle, req.speed))
@@ -239,7 +253,7 @@ async def motor_move(req: MoveRequest):
 
 @app.post("/api/motor/jog")
 async def motor_jog(req: JogRequest):
-    await esp32.send_raw(cmd_jog(req.motor, req.direction, req.steps, req.speed))
+    await esp32.send_raw(cmd_jog(req.motor, req.direction, req.degrees, req.speed))
     return {"status": "ok"}
 
 
@@ -252,6 +266,16 @@ async def motor_stop(req: StopRequest):
 @app.post("/api/motor/home")
 async def motor_home(req: HomeRequest):
     await esp32.send_raw(cmd_set_home(req.motor))
+    return {"status": "ok"}
+
+
+@app.post("/api/motor/config")
+async def motor_config(req: ConfigRequest):
+    await esp32.send_raw(cmd_set_config(
+        dir_flip_1=req.dir_flip_1,
+        dir_flip_2=req.dir_flip_2,
+        max_speed_sps=req.max_speed_sps,
+    ))
     return {"status": "ok"}
 
 

@@ -1,5 +1,5 @@
 import json
-from typing import Any
+from typing import Any, Optional
 
 
 def encode(msg: dict) -> bytes:
@@ -24,9 +24,9 @@ def cmd_move(motor: int, angle: float, speed: int = 80) -> bytes:
     return encode({"type": "MOVE", "motor": motor, "angle": round(angle, 4), "speed": speed})
 
 
-def cmd_jog(motor: int, direction: int, steps: int, speed: int = 30) -> bytes:
+def cmd_jog(motor: int, direction: int, degrees: float, speed: int = 30) -> bytes:
     return encode({"type": "JOG", "motor": motor, "direction": direction,
-                   "steps": steps, "speed": speed})
+                   "degrees": round(degrees, 4), "speed": speed})
 
 
 def cmd_stop(motor: int = 0) -> bytes:
@@ -52,3 +52,18 @@ def cmd_led_off_all() -> bytes:
 
 def cmd_set_telemetry(interval_ms: int) -> bytes:
     return encode({"type": "SET_TELEMETRY", "interval_ms": interval_ms})
+
+
+def cmd_set_config(
+    dir_flip_1: Optional[bool] = None,
+    dir_flip_2: Optional[bool] = None,
+    max_speed_sps: Optional[float] = None,
+) -> bytes:
+    msg: dict = {"type": "SET_CONFIG"}
+    if dir_flip_1 is not None:
+        msg["dir_flip_1"] = dir_flip_1
+    if dir_flip_2 is not None:
+        msg["dir_flip_2"] = dir_flip_2
+    if max_speed_sps is not None:
+        msg["max_speed_sps"] = max_speed_sps
+    return encode(msg)

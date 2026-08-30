@@ -117,32 +117,36 @@
     <!-- 1. Encoder dashboard -->
     <div class="card">
       <div class="card-title">Encoder Readings</div>
-      <div class="encoder-grid">
-        <div class="encoder-box">
-          <div class="encoder-label">Motor 1 — LED Arc (AS5600)</div>
-          <div class="encoder-value" id="enc-motor1">—<span>°</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--gap);">
+        <!-- Camera column -->
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <div class="encoder-box">
+            <div class="encoder-label">Motor 1 — Camera (AS5600)</div>
+            <div class="encoder-value" id="enc-motor1">—<span>°</span></div>
+          </div>
+          <div class="encoder-box">
+            <div class="encoder-label">Camera Final (OME85)</div>
+            <div class="encoder-value" id="enc-camera">—<span>°</span></div>
+          </div>
+          <div class="error-row">
+            <span class="text-dim">Camera Error</span>
+            <span class="error-value" id="err-cam">—</span>
+          </div>
         </div>
-        <div class="encoder-box">
-          <div class="encoder-label">LED Arc Final (AS5600)</div>
-          <div class="encoder-value" id="enc-led-arc">—<span>°</span></div>
-        </div>
-        <div class="encoder-box">
-          <div class="encoder-label">Motor 2 — Camera (AS5600)</div>
-          <div class="encoder-value" id="enc-motor2">—<span>°</span></div>
-        </div>
-        <div class="encoder-box">
-          <div class="encoder-label">Camera Final (AksIM-4)</div>
-          <div class="encoder-value" id="enc-camera">—<span>°</span></div>
-        </div>
-      </div>
-      <div style="display:flex;gap:8px;margin-top:10px;">
-        <div class="error-row" style="flex:1">
-          <span class="text-dim">LED Arc Error</span>
-          <span class="error-value" id="err-led">—</span>
-        </div>
-        <div class="error-row" style="flex:1">
-          <span class="text-dim">Camera Error</span>
-          <span class="error-value" id="err-cam">—</span>
+        <!-- LED column -->
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <div class="encoder-box">
+            <div class="encoder-label">Motor 2 — LED (AS5600)</div>
+            <div class="encoder-value" id="enc-motor2">—<span>°</span></div>
+          </div>
+          <div class="encoder-box">
+            <div class="encoder-label">LED Arc Final (AS5600 #3)</div>
+            <div class="encoder-value" id="enc-led-arc">—<span>°</span></div>
+          </div>
+          <div class="error-row">
+            <span class="text-dim">LED Arc Error</span>
+            <span class="error-value" id="err-led">—</span>
+          </div>
         </div>
       </div>
     </div>
@@ -300,14 +304,14 @@
         <!-- Motor 1 -->
         <div class="motor-row">
           <label style="font-size:13px;font-weight:600;color:var(--text);">
-            Motor 1 — LED Arc
+            Motor 1 — Camera
             <span id="m1-moving-badge" class="hidden" style="color:var(--yellow);font-size:11px;margin-left:6px;">● MOVING</span>
           </label>
 
           <!-- Jog -->
-          <label style="margin-top:4px;">Jog — steps</label>
+          <label style="margin-top:4px;">Jog — degrees</label>
           <div class="jog-row">
-            <input type="number" id="jog1-steps" value="100" min="1" max="10000" title="Number of microsteps" />
+            <input type="number" id="jog1-deg" value="1.0" min="0.1" max="360" step="0.1" title="Output shaft degrees" />
           </div>
           <label style="margin-top:2px;">Jog speed (%): <span id="jog1-speed-val">30</span></label>
           <input type="range" id="jog1-speed" min="1" max="100" value="30" />
@@ -315,6 +319,10 @@
             <button class="btn btn-secondary" style="flex:1" data-motor="1" data-dir="-1">◀ CCW</button>
             <button class="btn btn-secondary" style="flex:1" data-motor="1" data-dir="1">CW ▶</button>
           </div>
+          <label class="inline-label" style="margin-top:8px;">
+            <input type="checkbox" id="dir-flip-1" />
+            Reverse direction (Motor 1)
+          </label>
 
           <!-- Move to angle -->
           <label style="margin-top:10px;">Move to absolute angle</label>
@@ -331,14 +339,14 @@
         <!-- Motor 2 -->
         <div class="motor-row">
           <label style="font-size:13px;font-weight:600;color:var(--text);">
-            Motor 2 — Camera
+            Motor 2 — LED Arc
             <span id="m2-moving-badge" class="hidden" style="color:var(--yellow);font-size:11px;margin-left:6px;">● MOVING</span>
           </label>
 
           <!-- Jog -->
-          <label style="margin-top:4px;">Jog — steps</label>
+          <label style="margin-top:4px;">Jog — degrees</label>
           <div class="jog-row">
-            <input type="number" id="jog2-steps" value="100" min="1" max="10000" title="Number of microsteps" />
+            <input type="number" id="jog2-deg" value="1.0" min="0.1" max="360" step="0.1" title="Output shaft degrees" />
           </div>
           <label style="margin-top:2px;">Jog speed (%): <span id="jog2-speed-val">30</span></label>
           <input type="range" id="jog2-speed" min="1" max="100" value="30" />
@@ -346,6 +354,10 @@
             <button class="btn btn-secondary" style="flex:1" data-motor="2" data-dir="-1">◀ CCW</button>
             <button class="btn btn-secondary" style="flex:1" data-motor="2" data-dir="1">CW ▶</button>
           </div>
+          <label class="inline-label" style="margin-top:8px;">
+            <input type="checkbox" id="dir-flip-2" />
+            Reverse direction (Motor 2)
+          </label>
 
           <!-- Move to angle -->
           <label style="margin-top:10px;">Move to absolute angle</label>
