@@ -76,6 +76,15 @@ class ScanConfig(BaseModel):
     image_format: str = "tiff"  # tiff | png | bmp | jpeg
     output_folder: str = "."
     move_simultaneously: bool = True
+    # Seconds to hold each LED lit and let the arm settle before the camera
+    # captures. Was effectively 50 ms (too fast to expose); default 5 s.
+    settle_s: float = 5.0
+    # Closed-loop precise positioning: after the coarse move, nudge each motor
+    # until its output encoder reads the target within tolerance.
+    precise_positioning: bool = True
+    # Optional per-scan override of the camera keep-out half-angle (deg). None →
+    # use Settings.camera_keepout_deg. See Settings for what it guards against.
+    camera_keepout_deg: Optional[float] = None
 
 
 class ScanProgress(BaseModel):
@@ -98,6 +107,50 @@ class Settings(BaseSettings):
     telemetry_interval_ms: int = 100
     command_timeout_s: float = 2.0
     ping_interval_s: float = 5.0
+
+    # ── Closed-loop precise positioning ──────────────────────────────────────
+    precise_enabled: bool = True          # master switch (per-move flags override)
+    precise_gain: float = 0.8             # correction covers 80% of error → converges
+    precise_max_iter: int = 6             # hard cap; report best-achieved after this
+    precise_jog_speed_pct: int = 15       # slow, gentle correction nudges
+    precise_tol_camera_deg: float = 0.03  # OME85 read-noise floor (camera arm)
+    precise_tol_led_deg: float = 0.10     # AS5600 12-bit 0.088°/count (LED arc)
+
+    # Motor µstep resolution = 360 / (gear_ratio * steps_per_rev). The loop won't
+    # command a nudge finer than this (it can't move less than one µstep).
+    steps_per_rev: float = 3200.0
+    camera_gear_ratio: float = 8.0
+    led_gear_ratio: float = 3.0
+
+    # ── Camera / LED-arc occlusion guard ─────────────────────────────────────
+    # The LED arc blocks the lens's view of the sample when the two axes are
+    # angularly close, as seen from the sample. A scan position (led, cam) is
+    # occluded when |normalize(cam − led)| < camera_keepout_deg. The scan refuses
+    # to start if any grid position falls inside this window.
+    #
+    # The value is rig geometry: ~ atan(r_lens / R_cam) + atan((w_arc/2) / R_led),
+    # with r_lens = 2.25 cm (4.5 cm lens). Best set from an empirical sweep (park
+    # the camera, sweep the arc through it in the live preview, note the blocked
+    # span, halve it, add margin). DEFAULT 0.0 = guard DISABLED — set your
+    # calibrated half-angle here or via GR_camera_keepout_deg to turn it on.
+    camera_keepout_deg: float = 0.0
+
+    def precise_params_for(self, motor: int) -> dict:
+        """Per-motor tolerance + min-step floor. motor 1 = camera, 2 = LED arc."""
+        if motor == 1:
+            tol = self.precise_tol_camera_deg
+            gear = self.camera_gear_ratio
+        else:
+            tol = self.precise_tol_led_deg
+            gear = self.led_gear_ratio
+        min_step = 360.0 / (gear * self.steps_per_rev)
+        return {
+            "tol": tol,
+            "gain": self.precise_gain,
+            "max_iter": self.precise_max_iter,
+            "jog_speed": self.precise_jog_speed_pct,
+            "min_step": min_step,
+        }
 
     class Config:
         env_prefix = "GR_"

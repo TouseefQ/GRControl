@@ -24,6 +24,7 @@ from ..models import ScanConfig, ScanProgress, EncoderState
 from ..esp32.protocol import (
     cmd_move, cmd_stop, cmd_led_set, cmd_led_off_all
 )
+from .. import motion
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +46,12 @@ class ScanController:
         # Events signalled when MOVE_DONE arrives for each motor
         self._move_done_motor1 = asyncio.Event()
         self._move_done_motor2 = asyncio.Event()
+
+        # Last settled output-encoder angle per motor (from MOVE_DONE), used to
+        # seed the closed-loop refinement; and the residual left after it, for
+        # the capture metadata.
+        self._last_final: dict[int, Optional[float]] = {1: None, 2: None}
+        self._last_residual: dict[int, Optional[float]] = {1: None, 2: None}
 
         # Current encoder readings, kept fresh from telemetry
         self.current_encoder = EncoderState()
@@ -69,16 +76,44 @@ class ScanController:
         elif mtype == "MOVE_DONE":
             motor = msg.get("motor")
             if motor == 1:
+                self._last_final[1] = msg.get("final_angle")
                 self._move_done_motor1.set()
             elif motor == 2:
+                self._last_final[2] = msg.get("final_angle")
                 self._move_done_motor2.set()
 
     # ── Public control ────────────────────────────────────────────────────────
 
+    def keepout_deg(self, config: ScanConfig) -> float:
+        """Effective camera keep-out half-angle for this run: the per-scan
+        override if set, else the workspace default. <= 0 disables the guard."""
+        ko = config.camera_keepout_deg
+        return self._settings.camera_keepout_deg if ko is None else ko
+
+    def occluded_positions(self, config: ScanConfig) -> list[tuple[float, float]]:
+        """Every (led_pos, cam_pos) grid pair where the LED arc would sit in
+        front of the lens — |normalize(cam − led)| < keep-out, as seen from the
+        sample. Empty when the guard is disabled (keep-out <= 0)."""
+        keepout = self.keepout_deg(config)
+        if keepout <= 0:
+            return []
+        bad = []
+        for led_pos in config.led_axis.positions:
+            for cam_pos in config.camera_axis.positions:
+                if abs(motion.normalize_deg(cam_pos - led_pos)) < keepout:
+                    bad.append((led_pos, cam_pos))
+        return bad
+
     async def start(self, config: ScanConfig) -> bool:
-        if self._progress.running:
+        # Only refuse if a scan task is genuinely still alive. The `running`
+        # flag alone can get stuck True (hung move, left paused, crash before
+        # the finally block), which would otherwise lock out all future scans.
+        if self._task and not self._task.done():
             log.warning("Scan already running")
             return False
+        # Clear any stale state left over from a previous run.
+        self._progress.running = False
+        self._progress.paused = False
         self._config = config
         self._task = asyncio.create_task(self._run_scan())
         return True
@@ -139,11 +174,21 @@ class ScanController:
 
                         brightness = cfg.led_pattern.brightness[led_idx]
 
-                        # Turn on LED
+                        # Turn LED on and hold it lit while the arm settles,
+                        # so the camera has time to expose. This dwell (default
+                        # 5 s) replaces the old 50 ms blink that was too fast.
                         await self._esp.send_raw(
                             cmd_led_set(led_idx, 1, brightness)
                         )
-                        await asyncio.sleep(0.05)  # settle time
+                        settle = getattr(cfg, "settle_s", 5.0)
+                        # Stay responsive to pause/abort during a long dwell.
+                        waited = 0.0
+                        while waited < settle:
+                            if self._progress.paused:
+                                break
+                            step = min(0.1, settle - waited)
+                            await asyncio.sleep(step)
+                            waited += step
 
                         # Capture
                         filename = self._make_filename(
@@ -188,6 +233,10 @@ class ScanController:
     async def _move_to(self, led_pos: float, cam_pos: float, cfg: ScanConfig):
         self._move_done_motor1.clear()
         self._move_done_motor2.clear()
+        self._last_final[1] = None
+        self._last_final[2] = None
+        self._last_residual[1] = None
+        self._last_residual[2] = None
 
         move1 = self._esp.send_raw(cmd_move(1, led_pos, cfg.led_axis.speed_pct))
         move2 = self._esp.send_raw(cmd_move(2, cam_pos, cfg.camera_axis.speed_pct))
@@ -204,6 +253,26 @@ class ScanController:
             asyncio.wait_for(self._move_done_motor1.wait(), timeout=30),
             asyncio.wait_for(self._move_done_motor2.wait(), timeout=30),
         )
+
+        # Closed-loop refinement: nudge each motor until its output encoder reads
+        # the target within tolerance. Motor 1 was commanded to led_pos, motor 2
+        # to cam_pos (preserving the coarse move's motor→target mapping); seed the
+        # loop with the settled angle each motor just reported via MOVE_DONE.
+        if cfg.precise_positioning and self._settings.precise_enabled:
+            r1, r2 = await asyncio.gather(
+                motion.refine(self._esp, 1, led_pos, self._last_final[1],
+                              **self._settings.precise_params_for(1)),
+                motion.refine(self._esp, 2, cam_pos, self._last_final[2],
+                              **self._settings.precise_params_for(2)),
+            )
+            self._last_residual[1] = r1.get("residual")
+            self._last_residual[2] = r2.get("residual")
+            if not r1.get("encoder_ok"):
+                log.warning("Precise positioning: motor 1 encoder unavailable at "
+                            "LED=%.3f° — open-loop fallback", led_pos)
+            if not r2.get("encoder_ok"):
+                log.warning("Precise positioning: motor 2 encoder unavailable at "
+                            "CAM=%.3f° — open-loop fallback", cam_pos)
 
     def _make_filename(self, folder: str, led_pos: float, cam_pos: float,
                        led_idx: int, fmt: str) -> str:
@@ -226,6 +295,10 @@ class ScanController:
             "encoder_camera_deg": self.current_encoder.camera_deg,
             "encoder_led_error_deg": self.current_encoder.led_error_deg,
             "encoder_camera_error_deg": self.current_encoder.camera_error_deg,
+            # Closed-loop residual = encoder − target after refinement (None if
+            # precise positioning was off or the encoder was unavailable).
+            "led_residual_deg": self._last_residual[1],
+            "camera_residual_deg": self._last_residual[2],
         }
 
     async def _emit_progress(self):

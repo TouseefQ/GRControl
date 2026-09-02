@@ -44,6 +44,7 @@ from .esp32.protocol import (
 )
 from .camera.ids_peak import IDSCamera
 from .scan.controller import ScanController
+from . import motion
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -57,6 +58,13 @@ camera = IDSCamera()
 scan_ctrl = ScanController(esp32, camera, settings)
 device_state = DeviceState()
 _ws_clients: set[WebSocket] = set()
+
+# ── Encoder jitter capture (diagnostics) ────────────────────────────────────────
+# When active, every STATE telemetry frame appends the resting output-encoder
+# readings here so /api/encoder/jitter can report their peak-to-peak scatter.
+_jitter_active = False
+_jitter_camera: list = []   # OME85 (camera final) readings
+_jitter_led: list = []      # AS5600 #3 (LED arc final) readings
 
 # ── Static files & SPA ────────────────────────────────────────────────────────
 _frontend = Path(__file__).parent.parent / "frontend"
@@ -99,6 +107,10 @@ async def _on_esp32_message(msg: dict):
         device_state.ts = msg.get("ts", 0)
         device_state.dir_flip_1 = msg.get("dir_flip_1", False)
         device_state.dir_flip_2 = msg.get("dir_flip_2", False)
+
+        if _jitter_active:
+            _jitter_camera.append(msg.get("enc_camera_deg"))
+            _jitter_led.append(msg.get("enc_led_arc_deg"))
 
         await _broadcast({
             "event": "state",
@@ -222,6 +234,7 @@ class MoveRequest(BaseModel):
     motor: int
     angle: float
     speed: int = 80
+    precise: Optional[bool] = None  # None → fall back to settings.precise_enabled
 
 
 class JogRequest(BaseModel):
@@ -247,6 +260,23 @@ class ConfigRequest(BaseModel):
 
 @app.post("/api/motor/move")
 async def motor_move(req: MoveRequest):
+    use_precise = req.precise if req.precise is not None else settings.precise_enabled
+    if use_precise:
+        result = await motion.move_precise(
+            esp32, req.motor, req.angle, req.speed,
+            **settings.precise_params_for(req.motor),
+        )
+        await _broadcast({
+            "event": "move_result",
+            "motor": req.motor,
+            "target": req.angle,
+            "achieved": result.get("achieved"),
+            "residual": result.get("residual"),
+            "iterations": result.get("iterations"),
+            "converged": result.get("converged"),
+            "encoder_ok": result.get("encoder_ok"),
+        })
+        return {"status": "ok", **result}
     await esp32.send_raw(cmd_move(req.motor, req.angle, req.speed))
     return {"status": "ok"}
 
@@ -277,6 +307,42 @@ async def motor_config(req: ConfigRequest):
         max_speed_sps=req.max_speed_sps,
     ))
     return {"status": "ok"}
+
+
+class JitterRequest(BaseModel):
+    duration_s: float = 10.0
+
+
+@app.post("/api/encoder/jitter")
+async def encoder_jitter(req: JitterRequest):
+    """Diagnostics: hold the arm still, then call this to measure the resting
+    scatter of the output encoders (OME85 camera / AS5600 #3 LED arc). Samples
+    every STATE frame (~100 ms) for `duration_s`, then reports min/max/peak-to-
+    peak/std-dev per encoder — the empirical noise floor to size the precise-
+    positioning tolerances against. Do NOT move the motors while it runs."""
+    global _jitter_active
+    if not esp32.connected:
+        raise HTTPException(409, "Not connected to ESP32")
+    if _jitter_active:
+        raise HTTPException(409, "Jitter capture already running")
+
+    dur = max(1.0, min(req.duration_s, 120.0))
+    _jitter_camera.clear()
+    _jitter_led.clear()
+    _jitter_active = True
+    try:
+        await asyncio.sleep(dur)
+    finally:
+        _jitter_active = False
+
+    result = {
+        "duration_s": dur,
+        "samples": len(_jitter_camera),
+        "camera_ome85": motion.jitter_stats(_jitter_camera),
+        "led_arc_as5600": motion.jitter_stats(_jitter_led),
+    }
+    await _broadcast({"event": "encoder_jitter", **result})
+    return result
 
 
 # ── REST: LED control ─────────────────────────────────────────────────────────
@@ -396,6 +462,20 @@ async def camera_stream():
 
 @app.post("/api/scan/start")
 async def scan_start(config: ScanConfig):
+    # Occlusion guard: refuse to start if any grid position would put the LED
+    # arc in front of the lens (|θcam − θled| < keep-out). No silent data gaps.
+    blocked = scan_ctrl.occluded_positions(config)
+    if blocked:
+        keepout = scan_ctrl.keepout_deg(config)
+        sample = ", ".join(f"LED {l:g}°/CAM {c:g}°" for l, c in blocked[:5])
+        more = "" if len(blocked) <= 5 else f" (+{len(blocked) - 5} more)"
+        raise HTTPException(
+            422,
+            f"{len(blocked)} scan position(s) would put the LED arc within the "
+            f"{keepout:g}° camera keep-out — the arc blocks the lens's view of the "
+            f"sample. Offending: {sample}{more}. Adjust the angle ranges, or lower "
+            f"the keep-out angle (set to 0 to disable the guard).",
+        )
     ok = await scan_ctrl.start(config)
     if not ok:
         raise HTTPException(409, "Scan already running")

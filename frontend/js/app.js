@@ -208,6 +208,17 @@ on("move_done", (msg) => {
   logOk(`Motor ${msg.motor} reached ${msg.final_angle?.toFixed(4)}°`);
 });
 
+on("move_result", (msg) => {
+  if (!msg.encoder_ok) {
+    logWarn(`Motor ${msg.motor}: encoder unavailable — open-loop only (target ${msg.target?.toFixed(3)}°)`);
+    return;
+  }
+  const tag = msg.converged ? logOk : logWarn;
+  tag(`Motor ${msg.motor} landed at ${msg.achieved?.toFixed(4)}° `
+      + `(residual ${msg.residual?.toFixed(4)}°, ${msg.iterations} iter`
+      + `${msg.converged ? "" : ", not converged"})`);
+});
+
 on("error", (msg) => {
   logErr(`ESP32 error [${msg.code}]: ${msg.msg}`);
 });
@@ -240,15 +251,17 @@ document.querySelectorAll("[data-motor][data-dir]").forEach(btn => {
 document.getElementById("btn-move1").addEventListener("click", async () => {
   const angle = parseFloat(document.getElementById("move1-angle").value);
   const speed = parseInt(document.getElementById("move1-speed").value);
-  await api.motorMove(1, angle, speed);
-  log(`Move motor 1 → ${angle}° @ ${speed}%`);
+  const precise = document.getElementById("move1-precise").checked;
+  await api.motorMove(1, angle, speed, precise);
+  log(`Move motor 1 → ${angle}° @ ${speed}%${precise ? " (precise)" : ""}`);
 });
 
 document.getElementById("btn-move2").addEventListener("click", async () => {
   const angle = parseFloat(document.getElementById("move2-angle").value);
   const speed = parseInt(document.getElementById("move2-speed").value);
-  await api.motorMove(2, angle, speed);
-  log(`Move motor 2 → ${angle}° @ ${speed}%`);
+  const precise = document.getElementById("move2-precise").checked;
+  await api.motorMove(2, angle, speed, precise);
+  log(`Move motor 2 → ${angle}° @ ${speed}%${precise ? " (precise)" : ""}`);
 });
 
 // ── Motor stop ────────────────────────────────────────────────────────────────
@@ -257,6 +270,31 @@ document.getElementById("btn-stop1").addEventListener("click", async () => {
 });
 document.getElementById("btn-stop2").addEventListener("click", async () => {
   await api.motorStop(2); logWarn("Motor 2 stopped");
+});
+
+// ── Encoder jitter (diagnostics) ────────────────────────────────────────────────
+document.getElementById("btn-jitter")?.addEventListener("click", async (e) => {
+  const btn = e.currentTarget;
+  const secs = parseFloat(document.getElementById("jitter-seconds").value) || 10;
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = `Measuring ${secs}s…`;
+  logWarn(`Measuring encoder jitter for ${secs}s — keep the arm still…`);
+  try {
+    const r = await api.measureJitter(secs);
+    const fmt = (s, name) => s
+      ? logOk(`${name}: p-p ${s.peak_to_peak_deg.toFixed(4)}° `
+              + `(σ ${s.stdev_deg.toFixed(4)}°, min ${s.min_deg.toFixed(4)}°, `
+              + `max ${s.max_deg.toFixed(4)}°, n=${s.n})`)
+      : logWarn(`${name}: no readings (encoder null — not wired/reporting?)`);
+    fmt(r.camera_ome85, "Camera OME85");
+    fmt(r.led_arc_as5600, "LED arc AS5600 #3");
+  } catch (err) {
+    logErr(`Jitter capture failed: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
 });
 
 // ── Home ──────────────────────────────────────────────────────────────────────
@@ -450,13 +488,28 @@ function countPositions(start, stop, step) {
   return Math.floor((stop - start) / step) + 1;
 }
 
+// Mirror backend ScanAxis.positions (backend/models.py): inclusive of stop with
+// a 1e-9 slack, rounded to 4 dp — so the client occlusion count matches the
+// server's guard exactly.
+function axisPositions(start, stop, step) {
+  if (step <= 0) return [];
+  const out = [];
+  for (let a = start; a <= stop + 1e-9; a += step) out.push(Math.round(a * 1e4) / 1e4);
+  return out;
+}
+
+// Wrap an angle difference into (−180, 180]; matches motion.normalize_deg.
+function normalizeDeg(d) {
+  return ((d + 180) % 360 + 360) % 360 - 180;
+}
+
 function updateScanEstimate() {
-  const ledCount = countPositions(
+  const ledPos = axisPositions(
     parseFloat(document.getElementById("scan-led-start").value),
     parseFloat(document.getElementById("scan-led-stop").value),
     parseFloat(document.getElementById("scan-led-step").value),
   );
-  const camCount = countPositions(
+  const camPos = axisPositions(
     parseFloat(document.getElementById("scan-cam-start").value),
     parseFloat(document.getElementById("scan-cam-stop").value),
     parseFloat(document.getElementById("scan-cam-step").value),
@@ -465,14 +518,25 @@ function updateScanEstimate() {
     document.getElementById(`scan-led-${i}`)?.checked
   ).filter(Boolean).length;
 
-  const positions = ledCount * camCount;
-  const images    = positions * activeLeds;
-  document.getElementById("scan-pos-count").textContent = positions.toLocaleString();
+  const keepout = parseFloat(document.getElementById("scan-keepout").value) || 0;
+  let blocked = 0;
+  if (keepout > 0) {
+    for (const l of ledPos) {
+      for (const c of camPos) {
+        if (Math.abs(normalizeDeg(c - l)) < keepout) blocked++;
+      }
+    }
+  }
+
+  const usable = ledPos.length * camPos.length - blocked;
+  const images = usable * activeLeds;
+  document.getElementById("scan-pos-count").textContent =
+    usable.toLocaleString() + (blocked ? ` (${blocked.toLocaleString()} blocked)` : "");
   document.getElementById("scan-img-count").textContent = images.toLocaleString();
 }
 
 ["scan-led-start","scan-led-stop","scan-led-step",
- "scan-cam-start","scan-cam-stop","scan-cam-step"].forEach(id => {
+ "scan-cam-start","scan-cam-stop","scan-cam-step","scan-keepout"].forEach(id => {
   document.getElementById(id)?.addEventListener("input", updateScanEstimate);
 });
 
@@ -519,6 +583,9 @@ document.getElementById("btn-scan-start").addEventListener("click", async () => 
     image_format:       document.getElementById("img-format").value,
     output_folder:      document.getElementById("output-folder").value.trim() || "./captures",
     move_simultaneously: document.getElementById("scan-simultaneous").checked,
+    settle_s:           parseFloat(document.getElementById("scan-settle").value) || 5.0,
+    precise_positioning: document.getElementById("scan-precise").checked,
+    camera_keepout_deg: parseFloat(document.getElementById("scan-keepout").value) || 0,
   };
 
   try {

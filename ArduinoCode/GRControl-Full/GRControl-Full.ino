@@ -23,10 +23,11 @@
 #include <AccelStepper.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include "soc/gpio_reg.h"
 
 // ── WiFi ──────────────────────────────────────────────────────────────────────
-const char*    WIFI_SSID = "YOUR_SSID";
-const char*    WIFI_PASS = "YOUR_PASSWORD";
+const char*    WIFI_SSID = "Dax Pixel";
+const char*    WIFI_PASS = "tpjo9963";
 const uint16_t TCP_PORT  = 8888;
 
 // ── Motor / step constants ────────────────────────────────────────────────────
@@ -36,6 +37,12 @@ const uint16_t TCP_PORT  = 8888;
 // 200 RPM × 3200 steps/rev ÷ 60 s ≈ 10,667 steps/s  (safe for 17HS19-2004S1 @ 24 V)
 #define DEFAULT_MAX_SPS    10667.0f
 #define DEFAULT_ACCEL_SPS2 20000.0f
+// Auto-disable the stepper drivers after this many ms of no motion, to stop the
+// holding-current chopper buzz. Runtime-adjustable via SET_CONFIG (motor_idle_ms)
+// and persisted in NVS. Position is recovered from the absolute encoders on wake.
+#define DEFAULT_MOTOR_IDLE_MS 15000
+#define MOTOR_IDLE_MS_MIN       250
+#define MOTOR_IDLE_MS_MAX    600000
 
 // ── Motor pins ────────────────────────────────────────────────────────────────
 #define M1_STEP  21
@@ -57,6 +64,15 @@ const uint16_t TCP_PORT  = 8888;
 #define OME85_CLK  18
 #define OME85_DATA 17
 
+// Direct-register bit-bang (GPIO 17/18 are <32 → single register bank).
+#define OME85_CLK_HIGH()  REG_WRITE(GPIO_OUT_W1TS_REG, (1UL << OME85_CLK))
+#define OME85_CLK_LOW()   REG_WRITE(GPIO_OUT_W1TC_REG, (1UL << OME85_CLK))
+#define OME85_READ_DATA() ((REG_READ(GPIO_IN_REG) >> OME85_DATA) & 1UL)
+
+// Bit timing validated on this hardware: ~545 kHz (above OME85's 500 kHz min).
+inline void biss_clockDelay()  { for (int n = 0; n < 40; n++) __asm__("nop;"); }
+inline void biss_sampleDelay() { for (int n = 0; n < 30; n++) __asm__("nop;"); }
+
 // ── AS5600 I2C constants ──────────────────────────────────────────────────────
 #define AS5600_ADDR   0x36
 #define AS5600_RAW_HI 0x0C
@@ -72,6 +88,7 @@ const uint16_t TCP_PORT  = 8888;
 // ── BiSS-C frame constants ────────────────────────────────────────────────────
 #define BISS_DATA_BITS 17
 #define BISS_CRC_POLY  0x43
+#define OME85_SAMPLES  15    // majority-vote reads per angle (CRC unusable on this PCB)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Globals
@@ -89,15 +106,23 @@ uint8_t  ledState[LED_COUNT]      = {};
 uint16_t ledBrightness[LED_COUNT] = {};
 bool     motor1Moving = false;
 bool     motor2Moving = false;
+bool     motorsEnabled = false;         // driver EN state (both motors together)
+unsigned long lastMotorActiveMs = 0;    // last time either motor was moving
 
 float    homeOffsetCamera = 0.0f;  // raw OME85 angle (°) at home position
 float    homeOffsetLed    = 0.0f;  // raw AS5600 #3 angle (°) at home position
+float    homeOffsetMotor1 = 0.0f;  // raw AS5600 #1 (camera motor shaft) at home
+float    homeOffsetMotor2 = 0.0f;  // raw AS5600 #2 (LED motor shaft) at home
+float    lastCameraDeg    = 0.0f;  // last OME85 read (cached; updated only at rest)
+bool     cameraValid      = false; // was the last OME85 read successful?
 bool     dir_flip_1       = false;
 bool     dir_flip_2       = false;
 float    maxSpeedSPS      = DEFAULT_MAX_SPS;
+uint32_t motorIdleMs      = DEFAULT_MOTOR_IDLE_MS;  // idle-disable timeout (ms)
 
 unsigned long lastMsgMs       = 0;
 unsigned long lastTelemetryMs = 0;
+unsigned long lastPcaCheckMs  = 0;
 uint16_t      telemetryInterval = 100;
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -108,9 +133,12 @@ void nvs_load() {
   prefs.begin("grctrl", true);
   homeOffsetCamera = prefs.getFloat("homeCamera", 0.0f);
   homeOffsetLed    = prefs.getFloat("homeLed",    0.0f);
+  homeOffsetMotor1 = prefs.getFloat("homeM1",     0.0f);
+  homeOffsetMotor2 = prefs.getFloat("homeM2",     0.0f);
   dir_flip_1       = prefs.getBool("dirFlip1",   false);
   dir_flip_2       = prefs.getBool("dirFlip2",   false);
   maxSpeedSPS      = prefs.getFloat("maxSpeed", DEFAULT_MAX_SPS);
+  motorIdleMs      = prefs.getUInt("motorIdle", DEFAULT_MOTOR_IDLE_MS);
   prefs.end();
 }
 
@@ -128,6 +156,20 @@ void nvs_save_home_led(float v) {
   prefs.end();
 }
 
+void nvs_save_home_motor1(float v) {
+  homeOffsetMotor1 = v;
+  prefs.begin("grctrl", false);
+  prefs.putFloat("homeM1", v);
+  prefs.end();
+}
+
+void nvs_save_home_motor2(float v) {
+  homeOffsetMotor2 = v;
+  prefs.begin("grctrl", false);
+  prefs.putFloat("homeM2", v);
+  prefs.end();
+}
+
 void nvs_save_dir_flips() {
   prefs.begin("grctrl", false);
   prefs.putBool("dirFlip1", dir_flip_1);
@@ -139,6 +181,13 @@ void nvs_save_max_speed(float v) {
   maxSpeedSPS = v;
   prefs.begin("grctrl", false);
   prefs.putFloat("maxSpeed", v);
+  prefs.end();
+}
+
+void nvs_save_motor_idle(uint32_t v) {
+  motorIdleMs = constrain(v, (uint32_t)MOTOR_IDLE_MS_MIN, (uint32_t)MOTOR_IDLE_MS_MAX);
+  prefs.begin("grctrl", false);
+  prefs.putUInt("motorIdle", motorIdleMs);
   prefs.end();
 }
 
@@ -223,6 +272,15 @@ float as5600DegSW() {
   return roundf(raw * 360.0f / 4096.0f * 10000.0f) / 10000.0f;
 }
 
+// LED motor shaft angle relative to home (0–360°, wraps every motor revolution).
+float as5600DegSWHome(float homeOffset) {
+  int16_t raw = readAS5600RawSW();
+  if (raw < 0) return 0.0f;
+  float deg = raw * 360.0f / 4096.0f;
+  deg = fmod(deg - homeOffset + 360.0f, 360.0f);
+  return roundf(deg * 10000.0f) / 10000.0f;
+}
+
 // ── PCA9685 minimal driver via software I2C ───────────────────────────────────
 
 static bool pca_write_reg(uint8_t reg, uint8_t val) {
@@ -237,7 +295,10 @@ static bool pca_write_reg(uint8_t reg, uint8_t val) {
 void pca_begin() {
   pca_write_reg(PCA9685_MODE1, 0x00);   // clear SLEEP, wake up
   delay(1);
-  pca_write_reg(PCA9685_MODE2, 0x04);   // OUTDRV=1 (totem-pole outputs)
+  // OUTDRV=1 (totem-pole) + INVRT=1 (bit4). LEDs are common-anode: anode→V+,
+  // cathode→PWM output, so the channel sinks and LED-ON = output LOW. INVRT
+  // makes full-off→HIGH (LED off) and brightness scale the right way.
+  pca_write_reg(PCA9685_MODE2, 0x14);
   delay(1);
 }
 
@@ -326,75 +387,109 @@ uint8_t biss_crc(uint32_t rawData) {
   return (~crc) & 0x3F;
 }
 
-// Returns raw angle 0–360° on success, -1.0 on timeout / bad CRC.
-float ome85_raw_deg() {
+// Reads one BiSS-C frame via direct register bit-bang. Returns the raw 17-bit
+// position (0..131071), or -1 on a frame error / idle pattern. CRC is read but
+// NOT required: on this PCB the TXS0108E on the DATA line systematically
+// corrupts the trailing EW/CRC bits while the position field stays reliable.
+// (When the level shifter is fixed, re-enable the biss_crc() check here.)
+int32_t ome85_read_pos() {
   uint32_t positionData = 0;
   uint8_t  errorWarning = 0;
   uint8_t  crcData      = 0;
 
-  // Initiate read cycle with a falling edge on CLK
-  digitalWrite(OME85_CLK, LOW);
-  delayMicroseconds(1);
-  digitalWrite(OME85_CLK, HIGH);
-
-  // Wait for DATA to assert low (encoder starts responding)
-  uint32_t t0 = micros();
-  while (digitalRead(OME85_DATA) == HIGH) {
-    if (micros() - t0 > 1000) return -1.0f;
-  }
-
-  // Clock through ACK sequence until DATA goes high (CDS = start-of-data)
-  t0 = micros();
-  while (digitalRead(OME85_DATA) == LOW) {
-    digitalWrite(OME85_CLK, LOW);  delayMicroseconds(1);
-    digitalWrite(OME85_CLK, HIGH); delayMicroseconds(1);
-    if (micros() - t0 > 5000) return -1.0f;
-  }
-
-  // ── Critical timing section (DATA must be read in sync with CLK) ──────────
-  noInterrupts();
-
-  // Skip CDS bit
-  digitalWrite(OME85_CLK, LOW);  delayMicroseconds(1);
-  digitalWrite(OME85_CLK, HIGH); delayMicroseconds(1);
-
-  // Read 17 position bits (MSB first)
-  for (int i = 0; i < BISS_DATA_BITS; i++) {
-    digitalWrite(OME85_CLK, LOW);  delayMicroseconds(1);
-    digitalWrite(OME85_CLK, HIGH); delayMicroseconds(1);
-    positionData = (positionData << 1) | (uint32_t)digitalRead(OME85_DATA);
-  }
-
-  // Read 2 error/warning bits
-  for (int i = 0; i < 2; i++) {
-    digitalWrite(OME85_CLK, LOW);  delayMicroseconds(1);
-    digitalWrite(OME85_CLK, HIGH); delayMicroseconds(1);
-    errorWarning = (errorWarning << 1) | (uint8_t)digitalRead(OME85_DATA);
-  }
-
-  // Read 6 CRC bits
-  for (int i = 0; i < 6; i++) {
-    digitalWrite(OME85_CLK, LOW);  delayMicroseconds(1);
-    digitalWrite(OME85_CLK, HIGH); delayMicroseconds(1);
-    crcData = (crcData << 1) | (uint8_t)digitalRead(OME85_DATA);
-  }
-
-  interrupts();
-  // ── End critical section ───────────────────────────────────────────────────
-
-  // Return CLK to idle
-  digitalWrite(OME85_CLK, LOW);  delayMicroseconds(1);
-  digitalWrite(OME85_CLK, HIGH);
+  OME85_CLK_HIGH();
   delayMicroseconds(100);
 
-  // Validate CRC; reject all-zeros and all-ones (sensor error sentinels)
-  uint32_t dataForCRC  = (positionData << 2) | errorWarning;
-  uint8_t  expectedCRC = biss_crc(dataForCRC);
-  if (expectedCRC != crcData || positionData == 0 || positionData == 131071) {
-    return -1.0f;
+  noInterrupts();
+
+  // Trigger pulse
+  OME85_CLK_LOW();  biss_clockDelay();
+  OME85_CLK_HIGH();
+
+  // Wait for ACK (DATA goes LOW)
+  uint32_t cnt = 0;
+  while (OME85_READ_DATA() == 1) {
+    if (++cnt > 2000) { interrupts(); return -1; }
   }
 
-  uint32_t truePos = positionData & 0xFFFF;  // strip stuck MSB → 16-bit (0–65535)
+  // Clock until start bit (DATA goes HIGH)
+  cnt = 0;
+  while (OME85_READ_DATA() == 0) {
+    OME85_CLK_LOW();  biss_clockDelay();
+    OME85_CLK_HIGH(); biss_clockDelay();
+    if (++cnt > 2000) { interrupts(); return -1; }
+  }
+
+  // CDS bit — skip
+  OME85_CLK_LOW();  biss_clockDelay();
+  OME85_CLK_HIGH(); biss_sampleDelay();
+  (void)OME85_READ_DATA();
+  biss_clockDelay();
+
+  // 17 position bits (MSB first)
+  for (int i = 0; i < BISS_DATA_BITS; i++) {
+    OME85_CLK_LOW();  biss_clockDelay();
+    OME85_CLK_HIGH(); biss_sampleDelay();
+    positionData = (positionData << 1) | OME85_READ_DATA();
+    biss_clockDelay();
+  }
+
+  // 2 error/warning bits
+  for (int i = 0; i < 2; i++) {
+    OME85_CLK_LOW();  biss_clockDelay();
+    OME85_CLK_HIGH(); biss_sampleDelay();
+    errorWarning = (errorWarning << 1) | OME85_READ_DATA();
+    biss_clockDelay();
+  }
+
+  // 6 CRC bits
+  for (int i = 0; i < 6; i++) {
+    OME85_CLK_LOW();  biss_clockDelay();
+    OME85_CLK_HIGH(); biss_sampleDelay();
+    crcData = (crcData << 1) | OME85_READ_DATA();
+    biss_clockDelay();
+  }
+
+  // Idle pulse
+  OME85_CLK_LOW();  biss_clockDelay();
+  OME85_CLK_HIGH();
+
+  interrupts();
+  delayMicroseconds(100);
+
+  (void)errorWarning; (void)crcData;   // ignored until level shifter is fixed
+
+  if (positionData == 0 || positionData == 131071) return -1;
+  return (int32_t)positionData;
+}
+
+// Majority-vote read: samples OME85_SAMPLES times and returns the raw angle
+// (0–360°) of the position that appears most often (values within 2 counts fold
+// together to absorb LSB dither). Returns -1.0 if no frame could be read.
+// Blocking (~4 ms); call only when the camera motor is stationary.
+float ome85_raw_deg() {
+  int32_t vals[OME85_SAMPLES];
+  int     cnt[OME85_SAMPLES];
+  int     n = 0;
+
+  for (int s = 0; s < OME85_SAMPLES; s++) {
+    int32_t p = ome85_read_pos();
+    if (p < 0) continue;
+    int hit = -1;
+    for (int i = 0; i < n; i++) {
+      int32_t d = vals[i] - p; if (d < 0) d = -d;
+      if (d <= 2) { hit = i; break; }
+    }
+    if (hit < 0) { vals[n] = p; cnt[n] = 1; n++; }
+    else         { cnt[hit]++; }
+  }
+
+  if (n == 0) return -1.0f;
+
+  int best = 0;
+  for (int i = 1; i < n; i++) if (cnt[i] > cnt[best]) best = i;
+
+  uint32_t truePos = (uint32_t)vals[best] & 0xFFFF;  // strip stuck MSB → 16-bit
   return (float)truePos / 65536.0f * 360.0f;
 }
 
@@ -420,6 +515,37 @@ void setLed(uint8_t idx, uint8_t state, uint8_t brightness) {
 
 void allLedsOff() {
   for (uint8_t i = 0; i < LED_COUNT; i++) setLed(i, 0, 0);
+}
+
+// Read one PCA9685 register over software I2C. Returns 0xFF if the chip does
+// not ACK (e.g. unpowered).
+uint8_t pca_read_reg(uint8_t reg) {
+  sw_start();
+  if (!sw_write_byte(PCA9685_ADDR << 1)) { sw_stop(); return 0xFF; }
+  sw_write_byte(reg);
+  sw_repeated_start();
+  if (!sw_write_byte((PCA9685_ADDR << 1) | 0x01)) { sw_stop(); return 0xFF; }
+  uint8_t v = sw_read_byte(false);
+  sw_stop();
+  return v;
+}
+
+// Ensure the PCA9685 is initialized. The chip may be powered from the external
+// supply and thus come up AFTER the ESP32 has booted (or after a power cycle),
+// leaving it in its default state (SLEEP=1, AI=0) where LED writes don't take.
+// Detect that (AI bit clear or SLEEP set) and re-run init, then re-apply the
+// current LED states. Cheap enough to poll periodically and before LED commands.
+void pca_ensure() {
+  uint8_t mode1 = pca_read_reg(PCA9685_MODE1);
+  bool ready = (mode1 != 0xFF) && (mode1 & 0x20) && !(mode1 & 0x10); // AI=1, SLEEP=0
+  if (ready) return;
+
+  pca_begin();
+  pca_set_freq(1000);
+  for (uint8_t i = 0; i < LED_COUNT; i++) {
+    uint16_t val = ledState[i] ? (uint16_t)(ledBrightness[i] * 4095UL / 255) : 0;
+    pca_set_pin(i, val);
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -450,16 +576,38 @@ void enableMotors(bool en) {
   // PoStep60 ENABLE is active-LOW
   digitalWrite(M1_EN, en ? LOW : HIGH);
   digitalWrite(M2_EN, en ? LOW : HIGH);
+  motorsEnabled = en;
 }
 
-// On boot: read absolute output encoders and set step counters to match, so
-// the firmware knows where the arms are without requiring a re-home.
+// Read absolute output encoders and set step counters to match, so the firmware
+// knows where the arms are without a re-home. Skips a motor if its encoder read
+// fails, to avoid slamming the step counter to a false 0. Called at boot and
+// whenever the drivers are re-enabled after an idle-disable (the arm may have
+// drifted while de-energized).
 void initStepCounters() {
-  float camDeg = ome85DegFromHome();
-  motor1.setCurrentPosition(cameraAngleToSteps(camDeg));
+  float camRaw = ome85_raw_deg();
+  if (camRaw >= 0.0f) {
+    float camDeg = fmod(camRaw - homeOffsetCamera + 360.0f, 360.0f);
+    motor1.setCurrentPosition(cameraAngleToSteps(camDeg));
+    lastCameraDeg = roundf(camDeg * 10000.0f) / 10000.0f;
+    cameraValid = true;
+  }
+  if (readAS5600Raw(Wire1) >= 0) {
+    float ledDeg = encoderDeg(Wire1, homeOffsetLed);
+    motor2.setCurrentPosition(ledAngleToSteps(ledDeg));
+  }
+}
 
-  float ledDeg = encoderDeg(Wire1, homeOffsetLed);
-  motor2.setCurrentPosition(ledAngleToSteps(ledDeg));
+// Enable the drivers before a move. If they were idle-disabled, re-sync the step
+// counters to the absolute encoders first (must happen before moveTo/move, since
+// setCurrentPosition also resets the target). No-op resync if already enabled.
+void wakeMotors() {
+  if (!motorsEnabled) {
+    enableMotors(true);
+    delay(2);              // let the drivers energize before reading/moving
+    initStepCounters();
+  }
+  lastMotorActiveMs = millis();
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -499,12 +647,34 @@ void sendTelemetry() {
   StaticJsonDocument<512> doc;
   doc["type"]            = "STATE";
   doc["ts"]              = millis();
-  // Motor shaft encoders (raw 0–360°, no home offset)
-  doc["enc_motor1_deg"]  = encoderRawDeg(Wire);              // camera motor shaft (AS5600 #1)
-  doc["enc_motor2_deg"]  = as5600DegSW();                    // LED motor shaft (AS5600 #2)
-  // Output shaft encoders relative to home
-  doc["enc_camera_deg"]  = ome85DegFromHome();               // camera arm (OME85)
-  doc["enc_led_arc_deg"] = encoderDeg(Wire1, homeOffsetLed); // LED arc rod (AS5600 #3)
+  // Motor shaft encoders relative to home (0–360°, wrap every motor revolution)
+  doc["enc_motor1_deg"]  = encoderDeg(Wire, homeOffsetMotor1);  // camera motor shaft (AS5600 #1)
+  doc["enc_motor2_deg"]  = as5600DegSWHome(homeOffsetMotor2);   // LED motor shaft (AS5600 #2)
+  // Output shaft encoders relative to home. The OME85 read is blocking (~4 ms,
+  // interrupts off), so only read it when the camera motor is idle — otherwise
+  // it would stall motor1.run() and roughen the motion. Reuse the cached value
+  // during motion. Report JSON null when an encoder doesn't respond, so the UI
+  // shows "—" instead of a misleading 0°.
+  if (!motor1Moving) {
+    float raw = ome85_raw_deg();
+    if (raw >= 0.0f) {
+      float deg = fmod(raw - homeOffsetCamera + 360.0f, 360.0f);
+      lastCameraDeg = roundf(deg * 10000.0f) / 10000.0f;
+      cameraValid = true;
+    } else {
+      cameraValid = false;
+    }
+  }
+  if (cameraValid) doc["enc_camera_deg"] = lastCameraDeg;    // camera arm (OME85)
+  else             doc["enc_camera_deg"] = nullptr;
+
+  int16_t ledArcRaw = readAS5600Raw(Wire1);                  // LED arc rod (AS5600 #3)
+  if (ledArcRaw >= 0) {
+    float deg = fmod(ledArcRaw * 360.0f / 4096.0f - homeOffsetLed + 360.0f, 360.0f);
+    doc["enc_led_arc_deg"] = roundf(deg * 10000.0f) / 10000.0f;
+  } else {
+    doc["enc_led_arc_deg"] = nullptr;
+  }
   // Commanded output positions derived from step counters
   doc["cmd_camera_deg"]  = cmdCameraDeg();
   doc["cmd_led_deg"]     = cmdLedDeg();
@@ -513,6 +683,7 @@ void sendTelemetry() {
   doc["motor2_moving"]   = motor2Moving;
   doc["dir_flip_1"]      = dir_flip_1;
   doc["dir_flip_2"]      = dir_flip_2;
+  doc["motor_idle_ms"]   = motorIdleMs;
 
   JsonArray states  = doc.createNestedArray("led_states");
   JsonArray brights = doc.createNestedArray("led_brightness");
@@ -550,6 +721,7 @@ void handleCommand(const char* line) {
     float angle = doc["angle"] | 0.0f;
     int   spd   = doc["speed"] | 50;
     float sps   = speedToSPS(spd);
+    wakeMotors();   // enable + (if was idle-disabled) resync counters, before moveTo
     if (motor == 1 || motor == 0) {
       motor1.setMaxSpeed(sps);
       motor1.setAcceleration(sps * 2.0f);
@@ -562,7 +734,6 @@ void handleCommand(const char* line) {
       motor2.moveTo(ledAngleToSteps(angle));
       motor2Moving = true;
     }
-    enableMotors(true);
     sendAck("MOVE");
 
   } else if (strcmp(type, "JOG") == 0) {
@@ -571,6 +742,7 @@ void handleCommand(const char* line) {
     float deg   = doc["degrees"]   | 1.0f;
     int   spd   = doc["speed"]     | 30;
     float sps   = speedToSPS(spd);
+    wakeMotors();   // enable + (if was idle-disabled) resync counters, before move
     if (motor == 1 || motor == 0) {
       long delta = (long)(deg * CAMERA_GEAR_RATIO * STEPS_PER_REV / 360.0f) * dir;
       motor1.setMaxSpeed(sps);
@@ -585,7 +757,6 @@ void handleCommand(const char* line) {
       motor2.move(delta);
       motor2Moving = true;
     }
-    enableMotors(true);
     sendAck("JOG");
 
   } else if (strcmp(type, "STOP") == 0) {
@@ -598,20 +769,25 @@ void handleCommand(const char* line) {
     int motor = doc["motor"] | 0;
     if (motor == 1 || motor == 0) {
       float raw = ome85_raw_deg();
-      nvs_save_home_camera(raw >= 0.0f ? raw : 0.0f);
+      nvs_save_home_camera(raw >= 0.0f ? raw : 0.0f);   // camera output (OME85)
+      nvs_save_home_motor1(encoderRawDeg(Wire));        // camera motor shaft (AS5600 #1)
       motor1.setCurrentPosition(0);
+      lastCameraDeg = 0.0f;
     }
     if (motor == 2 || motor == 0) {
-      nvs_save_home_led(encoderRawDeg(Wire1));
+      nvs_save_home_led(encoderRawDeg(Wire1));          // LED arc output (AS5600 #3)
+      nvs_save_home_motor2(as5600DegSW());              // LED motor shaft (AS5600 #2)
       motor2.setCurrentPosition(0);
     }
     sendAck("SET_HOME");
 
   } else if (strcmp(type, "LED_SET") == 0) {
+    pca_ensure();
     setLed(doc["index"] | 0, doc["state"] | 0, doc["brightness"] | 200);
     sendAck("LED_SET");
 
   } else if (strcmp(type, "LED_ALL") == 0) {
+    pca_ensure();
     JsonArray states  = doc["states"];
     JsonArray brights = doc["brightness"];
     for (uint8_t i = 0; i < LED_COUNT && i < (uint8_t)states.size(); i++)
@@ -619,6 +795,7 @@ void handleCommand(const char* line) {
     sendAck("LED_ALL");
 
   } else if (strcmp(type, "LED_OFF_ALL") == 0) {
+    pca_ensure();
     allLedsOff();
     sendAck("LED_OFF_ALL");
 
@@ -641,6 +818,9 @@ void handleCommand(const char* line) {
     if (doc.containsKey("max_speed_sps")) {
       float v = doc["max_speed_sps"].as<float>();
       if (v > 0.0f) nvs_save_max_speed(v);
+    }
+    if (doc.containsKey("motor_idle_ms")) {
+      nvs_save_motor_idle(doc["motor_idle_ms"].as<uint32_t>());
     }
     if (changed) nvs_save_dir_flips();
     sendAck("SET_CONFIG");
@@ -742,11 +922,27 @@ void loop() {
   // Detect motion completion and send MOVE_DONE with final output encoder angle
   if (motor1Moving && motor1.distanceToGo() == 0) {
     motor1Moving = false;
-    sendMoveDone(1, ome85DegFromHome());
+    float raw = ome85_raw_deg();
+    if (raw >= 0.0f) {
+      float deg = fmod(raw - homeOffsetCamera + 360.0f, 360.0f);
+      lastCameraDeg = roundf(deg * 10000.0f) / 10000.0f;
+      cameraValid = true;
+    } else {
+      cameraValid = false;
+    }
+    sendMoveDone(1, lastCameraDeg);
   }
   if (motor2Moving && motor2.distanceToGo() == 0) {
     motor2Moving = false;
     sendMoveDone(2, encoderDeg(Wire1, homeOffsetLed));
+  }
+
+  // Auto-disable the drivers after they've been idle a while, to silence the
+  // holding-current chopper buzz. Refresh the idle timer whenever a motor moves.
+  if (motor1Moving || motor2Moving) {
+    lastMotorActiveMs = millis();
+  } else if (motorsEnabled && millis() - lastMotorActiveMs > motorIdleMs) {
+    enableMotors(false);
   }
 
   // TCP: accept new client or detect disconnect
@@ -788,6 +984,14 @@ void loop() {
     enableMotors(false);
     lastMsgMs = millis();
     Serial.println("[WATCHDOG] 10 s silence — safe state");
+  }
+
+  // Periodic PCA9685 health check (only while motors are idle — the register
+  // read is a blocking soft-I2C transaction). Recovers the LED driver if it was
+  // powered up after boot, and applies the current (default: all-off) states.
+  if (!motor1Moving && !motor2Moving && millis() - lastPcaCheckMs >= 1000) {
+    lastPcaCheckMs = millis();
+    pca_ensure();
   }
 
   // Periodic telemetry

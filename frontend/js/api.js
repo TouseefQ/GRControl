@@ -34,11 +34,11 @@ export async function disconnect() {
   return r.json();
 }
 
-export async function motorMove(motor, angle, speed) {
+export async function motorMove(motor, angle, speed, precise) {
   await fetch(`${BASE}/api/motor/move`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ motor, angle, speed }),
+    body: JSON.stringify({ motor, angle, speed, precise }),
   });
 }
 
@@ -76,6 +76,16 @@ export async function motorHome(motor) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ motor }),
   });
+}
+
+export async function measureJitter(duration_s = 10) {
+  const r = await fetch(`${BASE}/api/encoder/jitter`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ duration_s }),
+  });
+  if (!r.ok) throw new Error((await r.json()).detail);
+  return r.json();
 }
 
 export async function ledSet(index, state, brightness) {

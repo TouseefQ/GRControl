@@ -111,6 +111,9 @@ class ESP32Connection:
 
         # ACK/response futures keyed by command type
         self._pending: dict[str, asyncio.Future] = {}
+        # MOVE_DONE futures keyed by motor id (resolved with the settled
+        # output-encoder angle). Used by the closed-loop precise positioning.
+        self._move_done_futures: dict[int, asyncio.Future] = {}
 
     def add_callback(self, cb: MessageCallback) -> None:
         self._callbacks.append(cb)
@@ -154,6 +157,19 @@ class ESP32Connection:
         if not self._transport:
             raise RuntimeError("Not connected")
         await self._transport.write(data)
+
+    def arm_move_done(self, motor: int) -> asyncio.Future:
+        """Create (or replace) a future that resolves when the next MOVE_DONE
+        for `motor` arrives, carrying that motor's settled output-encoder angle
+        (or None if the encoder read failed). Call this *before* sending the
+        MOVE/JOG so the reply can't be missed."""
+        loop = asyncio.get_event_loop()
+        old = self._move_done_futures.get(motor)
+        if old and not old.done():
+            old.cancel()
+        fut: asyncio.Future = loop.create_future()
+        self._move_done_futures[motor] = fut
+        return fut
 
     async def send_command(self, data: bytes, expect_ack_for: Optional[str] = None) -> Optional[dict]:
         """Send a command and optionally wait for an ACK response."""
@@ -205,6 +221,14 @@ class ESP32Connection:
                 fut = self._pending.pop("PING")
                 if not fut.done():
                     fut.set_result(msg)
+        elif msg_type == "MOVE_DONE":
+            # Resolve any waiter for this motor with its settled angle. Done
+            # before the callback fan-out so the closed loop and the existing
+            # scan-controller event both see it.
+            motor = msg.get("motor")
+            fut = self._move_done_futures.pop(motor, None)
+            if fut and not fut.done():
+                fut.set_result(msg.get("final_angle"))
 
         for cb in self._callbacks:
             try:
