@@ -194,8 +194,14 @@ class IDSCamera:
         finally:
             self._data_stream.QueueBuffer(raw_buffer)
 
+        # Collapse whatever the accessor returned into a 2-D uint16 mosaic.
+        # get_numpy_3D hands back a 16-bit single-channel image as (H, W, 2)
+        # little-endian bytes, so reinterpret each byte-pair as one uint16.
         if arr.ndim == 3 and arr.shape[-1] == 1:
             arr = arr[..., 0]
+        elif arr.ndim == 3 and arr.shape[-1] == 2 and arr.dtype == np.uint8:
+            h, w = arr.shape[:2]
+            arr = np.ascontiguousarray(arr).view("<u2").reshape(h, w)
         if arr.ndim != 2:
             raise RuntimeError(
                 f"Raw Bayer frame is not 2-D (shape {arr.shape}, fmt {self._pixel_format})")
