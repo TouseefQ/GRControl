@@ -37,6 +37,8 @@ class IDSCamera:
         self._ids_ipl_ext = None
         self._flip_x = False
         self._flip_y = False
+        self._conv_mode = None       # cached Bayer→BGRa8 conversion mode
+        self._wb_software = False     # software gray-world WB fallback active?
 
     @staticmethod
     def _ensure_gentl_path():
@@ -84,13 +86,13 @@ class IDSCamera:
         BGRa8 (a new image with its own memory), then requeue the buffer."""
         ipl = self._ids_ipl
         image = self._ids_ipl_ext.BufferToImage(raw_buffer)
-        # HQ mode produces correct colour from the Bayer pattern; fall back to
-        # Fast if this SDK version doesn't expose ConversionMode_HQ.
-        mode = getattr(ipl, "ConversionMode_HQ",
-                       getattr(ipl, "ConversionMode_HighQuality",
-                               ipl.ConversionMode_Fast))
-        log.info("Bayer conversion mode: %s", mode)
-        converted = image.ConvertTo(ipl.PixelFormatName_BGRa8, mode)
+        # HighQuality gives the best colour from the Bayer pattern; this SDK
+        # build has no ConversionMode_HQ, so prefer HighQuality then Fast.
+        # Resolved once at open and cached (this runs on every frame).
+        if self._conv_mode is None:
+            self._conv_mode = getattr(ipl, "ConversionMode_HighQuality",
+                                      ipl.ConversionMode_Fast)
+        converted = image.ConvertTo(ipl.PixelFormatName_BGRa8, self._conv_mode)
         self._data_stream.QueueBuffer(raw_buffer)
         return converted
 
@@ -103,6 +105,21 @@ class IDSCamera:
             if fn is not None:
                 return fn()
         raise RuntimeError("IPL image has no known NumPy accessor")
+
+    @staticmethod
+    def _apply_gray_world_wb(arr):
+        """Gray-world white balance on an RGB(A) uint8 array: scale each colour
+        channel so their means match, which removes the green cast that
+        unbalanced Bayer demosaicing leaves behind. Returns an RGB uint8 array
+        (alpha dropped). Used only when the camera has no hardware auto-WB."""
+        import numpy as np
+        rgb = arr[..., :3].astype(np.float32)
+        means = rgb.reshape(-1, 3).mean(axis=0)
+        means = np.maximum(means, 1e-3)
+        target = means.mean()
+        gains = np.clip(target / means, 0.25, 4.0)
+        rgb *= gains
+        return np.clip(rgb, 0, 255).astype(np.uint8)
 
     def _save_image(self, image, output_path: str, fmt: str):
         """Save an IPL image. JPG/PNG/BMP are written natively by the SDK
@@ -128,6 +145,38 @@ class IDSCamera:
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
+    def _setup_white_balance(self):
+        """Enable the camera's hardware auto white balance. Node and enum-entry
+        names vary across IDS models, so enumerate what this camera offers, log
+        it, and try the auto entries in order. If none work, switch on the
+        software gray-world fallback so the preview/captures are still balanced."""
+        nm = self._node_map
+        try:
+            node = nm.FindNode("BalanceWhiteAuto")
+        except Exception as e:
+            log.warning("No BalanceWhiteAuto node (%s) — using software white balance", e)
+            self._wb_software = True
+            return
+
+        try:
+            entries = [e.SymbolicValue() for e in node.Entries()]
+            log.info("BalanceWhiteAuto entries: %s", entries)
+        except Exception:
+            entries = []
+
+        for entry in ("Continuous", "Once"):
+            if entries and entry not in entries:
+                continue
+            try:
+                node.SetCurrentEntry(entry)
+                log.info("Auto white balance = %s (hardware)", entry)
+                return
+            except Exception as e:
+                log.warning("BalanceWhiteAuto=%s failed: %s", entry, e)
+
+        log.warning("Hardware auto white balance unavailable — using software gray-world WB")
+        self._wb_software = True
+
     def _open_first_camera(self):
         peak = self._ids_peak
         peak.Library.Initialize()
@@ -148,12 +197,9 @@ class IDSCamera:
             pass
 
         # Auto white balance — matches IDS Cockpit behaviour and eliminates
-        # the green cast that manual/default WB produces on Bayer sensors.
-        try:
-            self._node_map.FindNode("BalanceWhiteAuto").SetCurrentEntry("Continuous")
-            log.info("Auto white balance enabled")
-        except Exception:
-            pass
+        # the green cast that unbalanced Bayer demosaicing produces. Falls back
+        # to a software gray-world correction if the camera has no auto-WB node.
+        self._setup_white_balance()
 
         payload_size = self._node_map.FindNode("PayloadSize").Value()
         for _ in range(self._data_stream.NumBuffersAnnouncedMinRequired()):
@@ -214,13 +260,15 @@ class IDSCamera:
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Save image
-        if self._flip_x or self._flip_y:
+        # Save image. Route through NumPy when a software transform is needed
+        # (gray-world WB and/or flip); otherwise let the SDK write it natively.
+        if self._wb_software or self._flip_x or self._flip_y:
             from PIL import Image as PILImage
-            import io as _io
             arr = self._ipl_to_numpy(ipl_image)
             if arr.ndim == 3 and arr.shape[2] >= 3:
                 arr = arr[..., [2, 1, 0]]
+            if self._wb_software:
+                arr = self._apply_gray_world_wb(arr)
             if self._flip_x:
                 arr = arr[:, ::-1]
             if self._flip_y:
@@ -283,6 +331,8 @@ class IDSCamera:
             # BGRa8 → RGB: select channels [2,1,0] = R,G,B (alpha ignored)
             if arr.ndim == 3 and arr.shape[2] >= 3:
                 arr = arr[..., [2, 1, 0]]
+            if self._wb_software:
+                arr = self._apply_gray_world_wb(arr)
             if self._flip_x:
                 arr = arr[:, ::-1]
             if self._flip_y:
