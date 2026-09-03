@@ -165,36 +165,34 @@ class IDSCamera:
             log.warning("Set PixelFormat=%s failed: %s — keeping default", choice, e)
             self._pixel_format = self._current_pixel_format()
 
-    def _save_raw_bayer_tiff(self, raw_buffer, output_path: str):
-        """Save the finished buffer as a single-channel 16-bit TIFF holding the
-        true sensor mosaic (0–4095, left-justified in a 16-bit word). No
-        debayering, no white balance, no colour conversion — the CFA phase is
-        recorded in the sidecar so the analysis tool can debayer with its own
-        gains. Always requeues the buffer (finally) so a save error can't leak
-        it. Geometric flips are intentionally NOT applied here: flipping a Bayer
-        mosaic shifts its CFA phase, which would desync it from the recorded
-        pixel_format — reorient in analysis instead."""
-        import numpy as np
-        from PIL import Image as PILImage
+    def _resolve_conv_mode(self):
+        """Bayer→BGRa8 conversion mode, resolved once and cached. HighQuality
+        gives the best colour; some SDK builds only have Fast."""
         ipl = self._ids_ipl
-        try:
-            image = self._ids_ipl_ext.BufferToImage(raw_buffer)
-            fmt = self._pixel_format or ""
-            # If the active format is a packed 12-bit Bayer, repack (not
-            # debayer) to the unpacked variant of the same phase — lossless.
-            if fmt.startswith("Bayer") and "12" in fmt and not fmt.endswith("12"):
-                phase = fmt[5:7]
-                target = getattr(ipl, f"PixelFormatName_Bayer{phase}12", None)
-                if target is not None:
-                    try:
-                        image = image.ConvertTo(target, ipl.ConversionMode_Fast)
-                    except Exception as e:
-                        log.warning("Repack packed→unpacked Bayer12 failed: %s", e)
-            arr = np.array(self._ipl_to_numpy(image))  # copy out before requeue
-        finally:
-            self._data_stream.QueueBuffer(raw_buffer)
+        if self._conv_mode is None:
+            self._conv_mode = getattr(ipl, "ConversionMode_HighQuality",
+                                      ipl.ConversionMode_Fast)
+        return self._conv_mode
 
-        # Collapse whatever the accessor returned into a 2-D uint16 mosaic.
+    def _raw_bayer_uint16(self, image):
+        """From an IPL image on the current (packed 12-bit) Bayer format, return
+        the raw mosaic as a 2-D uint16 NumPy array (values 0–4095). Repacks a
+        packed format to its unpacked 16-bit variant first — lossless, no
+        debayering. Copies out of buffer memory so the caller can requeue.
+        No white balance and no flips: flipping a Bayer mosaic shifts its CFA
+        phase, desyncing it from the recorded pixel_format — reorient offline."""
+        import numpy as np
+        ipl = self._ids_ipl
+        fmt = self._pixel_format or ""
+        if fmt.startswith("Bayer") and "12" in fmt and not fmt.endswith("12"):
+            phase = fmt[5:7]
+            target = getattr(ipl, f"PixelFormatName_Bayer{phase}12", None)
+            if target is not None:
+                try:
+                    image = image.ConvertTo(target, ipl.ConversionMode_Fast)
+                except Exception as e:
+                    log.warning("Repack packed→unpacked Bayer12 failed: %s", e)
+        arr = np.array(self._ipl_to_numpy(image))  # copy out before requeue
         # get_numpy_3D hands back a 16-bit single-channel image as (H, W, 2)
         # little-endian bytes, so reinterpret each byte-pair as one uint16.
         if arr.ndim == 3 and arr.shape[-1] == 1:
@@ -205,7 +203,32 @@ class IDSCamera:
         if arr.ndim != 2:
             raise RuntimeError(
                 f"Raw Bayer frame is not 2-D (shape {arr.shape}, fmt {self._pixel_format})")
-        arr = np.ascontiguousarray(arr, dtype="<u2")
+        return np.ascontiguousarray(arr, dtype="<u2")
+
+    def _debayered_rgb8(self, image):
+        """From an IPL image (raw Bayer), debayer to 8-bit RGB for *viewing*:
+        apply the same gray-world WB as the live preview (when active) and the
+        geometric flips, so the companion PNG matches what the operator sees.
+        Returns an HxWx3 uint8 array — a viewable aid, NOT measurement data."""
+        import numpy as np
+        ipl = self._ids_ipl
+        color = image.ConvertTo(ipl.PixelFormatName_BGRa8, self._resolve_conv_mode())
+        arr = np.array(self._ipl_to_numpy(color))  # copy out before requeue
+        if arr.ndim == 3 and arr.shape[2] >= 3:
+            arr = arr[..., [2, 1, 0]]  # BGR(A) → RGB
+        arr = arr[..., :3]
+        if self._wb_software:
+            arr = self._apply_gray_world_wb(arr)
+        if self._flip_x:
+            arr = arr[:, ::-1]
+        if self._flip_y:
+            arr = arr[::-1]
+        return np.ascontiguousarray(arr)
+
+    @staticmethod
+    def _write_tiff16(arr, output_path: str):
+        """Write a 2-D uint16 array as a single-channel 16-bit TIFF."""
+        from PIL import Image as PILImage
         h, w = arr.shape
         try:
             img = PILImage.fromarray(arr, mode="I;16")
@@ -363,13 +386,26 @@ class IDSCamera:
         if fmt == "tiff":
             # Full-depth raw Bayer mosaic — single-channel 16-bit, no debayer /
             # WB / colour conversion, so the pixels keep their true sensor
-            # values (0–4095) for quantitative measurement. Debayer offline.
-            # _save_raw_bayer_tiff requeues the buffer itself (finally).
-            self._save_raw_bayer_tiff(raw_buffer, str(path))
+            # values (0–4095) for quantitative measurement (debayer offline).
+            # Alongside it, write a viewable 8-bit PNG (debayered + gray-world
+            # WB'd, matching the live preview) so the operator can see the shot.
+            # Both are derived from the SAME buffer before its single requeue.
+            from PIL import Image as PILImage
+            try:
+                image = self._ids_ipl_ext.BufferToImage(raw_buffer)
+                raw_arr = self._raw_bayer_uint16(image)      # 16-bit mosaic (copy)
+                view_arr = self._debayered_rgb8(image)       # 8-bit RGB view (copy)
+            finally:
+                self._data_stream.QueueBuffer(raw_buffer)
+            self._write_tiff16(raw_arr, str(path))
+            png_path = path.with_suffix(".png")
+            PILImage.fromarray(view_arr).save(str(png_path), format="PNG")
             metadata.setdefault("pixel_format", self._pixel_format)
             metadata.setdefault("raw_bayer", True)
             metadata.setdefault("bit_depth", 12)
-            metadata.setdefault("white_balance", "none (raw mosaic)")
+            metadata.setdefault("white_balance",
+                                "none (raw mosaic); companion .png is WB'd 8-bit")
+            metadata.setdefault("preview_png", png_path.name)
         else:
             # Viewable colour formats: debayer to BGRa8. Still RAW radiometrically
             # (no white balance) — only geometric flips are applied.
