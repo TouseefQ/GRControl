@@ -547,20 +547,37 @@ function updateScanEstimate() {
   ).filter(Boolean).length;
 
   const keepout = parseFloat(document.getElementById("scan-keepout").value) || 0;
-  let blocked = 0;
+  const blockedPairs = [];
   if (keepout > 0) {
     for (const l of ledPos) {
       for (const c of camPos) {
-        if (Math.abs(normalizeDeg(c - l)) < keepout) blocked++;
+        if (Math.abs(normalizeDeg(c - l)) < keepout) blockedPairs.push([l, c]);
       }
     }
   }
+  const blocked = blockedPairs.length;
 
   const usable = ledPos.length * camPos.length - blocked;
   const images = usable * activeLeds;
   document.getElementById("scan-pos-count").textContent =
     usable.toLocaleString() + (blocked ? ` (${blocked.toLocaleString()} blocked)` : "");
   document.getElementById("scan-img-count").textContent = images.toLocaleString();
+
+  // Itemized list of skipped positions, shown whenever any are blocked (so it
+  // stays visible through the scan run). Same math as the backend guard.
+  const box = document.getElementById("scan-skipped-box");
+  const listEl = document.getElementById("scan-skipped-list");
+  document.getElementById("scan-skipped-count").textContent = blocked.toLocaleString();
+  if (blocked > 0) {
+    const fmtDeg = v => (Math.round(v * 1e4) / 1e4).toString();
+    listEl.innerHTML = blockedPairs
+      .map(([l, c]) => `LED ${fmtDeg(l)}° / CAM ${fmtDeg(c)}°`)
+      .join("<br>");
+    box.style.display = "";
+  } else {
+    listEl.innerHTML = "";
+    box.style.display = "none";
+  }
 }
 
 ["scan-led-start","scan-led-stop","scan-led-step",

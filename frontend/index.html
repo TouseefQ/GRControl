@@ -286,6 +286,16 @@
         Total captures: <span id="scan-img-count" style="color:var(--text);font-weight:600;">—</span>
       </div>
 
+      <!-- Skipped positions (LED arc occludes the lens) -->
+      <details id="scan-skipped-box" style="display:none;margin-top:8px;">
+        <summary style="font-size:12px;color:var(--yellow);cursor:pointer;">
+          <span id="scan-skipped-count">0</span> position(s) skipped — LED arc blocks the lens (within keep-out)
+        </summary>
+        <div id="scan-skipped-list"
+             style="margin-top:6px;font-size:11px;color:var(--text-dim);max-height:180px;overflow:auto;
+                    font-family:monospace;line-height:1.6;"></div>
+      </details>
+
       <div class="btn-row mt-8">
         <button class="btn btn-success" id="btn-scan-start">▶ Start Scan</button>
         <button class="btn btn-secondary hidden" id="btn-scan-pause">⏸ Pause</button>
