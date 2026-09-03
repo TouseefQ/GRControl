@@ -65,8 +65,9 @@ class ScanAxis(BaseModel):
 
 
 class LedPattern(BaseModel):
-    enabled: list[bool] = Field(default_factory=lambda: [True] * 7)
-    brightness: list[int] = Field(default_factory=lambda: [200] * 7)
+    # Default: only L1 enabled, all at full brightness (matches the UI defaults).
+    enabled: list[bool] = Field(default_factory=lambda: [i == 0 for i in range(7)])
+    brightness: list[int] = Field(default_factory=lambda: [255] * 7)
 
 
 class ScanConfig(BaseModel):

@@ -320,7 +320,7 @@ document.getElementById("dir-flip-2")?.addEventListener("change", async (e) => {
 
 // ── LED controls ──────────────────────────────────────────────────────────────
 const ledStates = new Array(7).fill(0);
-const ledBrightness = new Array(7).fill(200);
+const ledBrightness = new Array(7).fill(255);
 
 const ledGrid = document.getElementById("led-grid");
 for (let i = 0; i < 7; i++) {
@@ -341,7 +341,7 @@ for (let i = 0; i < 7; i++) {
   const slider = document.createElement("input");
   slider.type = "range";
   slider.className = "led-brightness";
-  slider.min = 0; slider.max = 255; slider.value = 200;
+  slider.min = 0; slider.max = 255; slider.value = 255;
   slider.title = `LED ${i + 1} brightness`;
   slider.addEventListener("input", () => {
     ledBrightness[i] = parseInt(slider.value);
@@ -496,7 +496,7 @@ for (let i = 0; i < 7; i++) {
   const cb = document.createElement("input");
   cb.type = "checkbox";
   cb.id = `scan-led-${i}`;
-  cb.checked = true;
+  cb.checked = (i === 0);   // default: only L1 selected
   cb.addEventListener("change", updateScanEstimate);
   label.appendChild(cb);
   label.appendChild(document.createTextNode(`L${i + 1}`));
@@ -606,7 +606,7 @@ document.getElementById("btn-scan-start").addEventListener("click", async () => 
   const enabledLeds  = Array.from({ length: 7 }, (_, i) =>
     document.getElementById(`scan-led-${i}`)?.checked ?? true
   );
-  const ledBrights   = Array.from({ length: 7 }, () => 200);
+  const ledBrights   = Array.from({ length: 7 }, () => 255);
 
   const config = {
     led_axis: {
