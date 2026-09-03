@@ -35,6 +35,8 @@ class IDSCamera:
         self._ids_peak = None
         self._ids_ipl = None
         self._ids_ipl_ext = None
+        self._flip_x = False
+        self._flip_y = False
 
     @staticmethod
     def _ensure_gentl_path():
@@ -213,7 +215,22 @@ class IDSCamera:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         # Save image
-        self._save_image(ipl_image, str(path), fmt)
+        if self._flip_x or self._flip_y:
+            from PIL import Image as PILImage
+            import io as _io
+            arr = self._ipl_to_numpy(ipl_image)
+            if arr.ndim == 3 and arr.shape[2] >= 3:
+                arr = arr[..., [2, 1, 0]]
+            if self._flip_x:
+                arr = arr[:, ::-1]
+            if self._flip_y:
+                arr = arr[::-1]
+            pil_img = PILImage.fromarray(arr[..., :3].copy())
+            fmt_map = {"jpeg": "JPEG", "jpg": "JPEG", "png": "PNG", "bmp": "BMP", "tiff": "TIFF"}
+            save_kw = {"quality": 95} if fmt in ("jpeg", "jpg") else {}
+            pil_img.save(str(path), format=fmt_map.get(fmt, "TIFF"), **save_kw)
+        else:
+            self._save_image(ipl_image, str(path), fmt)
 
         # Save sidecar metadata JSON
         meta_path = path.with_suffix(".json")
@@ -266,8 +283,12 @@ class IDSCamera:
             # BGRa8 → RGB: select channels [2,1,0] = R,G,B (alpha ignored)
             if arr.ndim == 3 and arr.shape[2] >= 3:
                 arr = arr[..., [2, 1, 0]]
+            if self._flip_x:
+                arr = arr[:, ::-1]
+            if self._flip_y:
+                arr = arr[::-1]
             buf = io.BytesIO()
-            PILImage.fromarray(arr).save(buf, format="JPEG", quality=80)
+            PILImage.fromarray(arr.copy()).save(buf, format="JPEG", quality=80)
             return buf.getvalue()
         except Exception as e:
             log.warning("Preview grab failed: %s", e)
@@ -324,13 +345,14 @@ class IDSCamera:
             )
 
     def _set_reverse(self, reverse_x: Optional[bool], reverse_y: Optional[bool]):
-        for node_name, value in (("ReverseX", reverse_x), ("ReverseY", reverse_y)):
-            if value is None:
-                continue
-            try:
-                self._node_map.FindNode(node_name).SetValue(value)
-            except Exception as e:
-                log.warning("set %s failed: %s", node_name, e)
+        # ReverseX/Y nodes are often locked during acquisition; use software flip
+        # as the reliable fallback (applied in preview and capture via numpy).
+        if reverse_x is not None:
+            self._flip_x = reverse_x
+            log.info("Mirror X = %s (software)", reverse_x)
+        if reverse_y is not None:
+            self._flip_y = reverse_y
+            log.info("Flip Y = %s (software)", reverse_y)
 
     async def set_reverse(self, reverse_x: Optional[bool] = None,
                           reverse_y: Optional[bool] = None):
