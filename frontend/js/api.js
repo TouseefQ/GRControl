@@ -130,6 +130,16 @@ export async function cameraSettings(exposure_us, gain, reverse_x = null, revers
   return r.json();
 }
 
+export async function cameraCapture(output_folder, image_format) {
+  const r = await fetch(`${BASE}/api/camera/capture`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ output_folder, image_format }),
+  });
+  if (!r.ok) throw new Error((await r.json()).detail);
+  return r.json();
+}
+
 export async function scanStart(config) {
   const r = await fetch(`${BASE}/api/scan/start`, {
     method: "POST",

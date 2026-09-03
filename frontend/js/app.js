@@ -466,6 +466,22 @@ document.getElementById("btn-preview-refresh").addEventListener("click", async (
   } catch (e) { logWarn(`Preview: ${e.message}`); }
 });
 
+// ── Save Image (single manual capture, works idle or during live preview) ──────
+document.getElementById("btn-cam-save").addEventListener("click", async () => {
+  const folder = document.getElementById("output-folder").value.trim() || "./captures";
+  const fmt = document.getElementById("img-format").value;
+  const btn = document.getElementById("btn-cam-save");
+  btn.disabled = true;
+  try {
+    const res = await api.cameraCapture(folder, fmt);  // gallery updates via image_captured
+    logOk(`Image saved: ${res.path}`);
+  } catch (e) {
+    logErr(`Save image failed: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 // ── Scan config helpers ───────────────────────────────────────────────────────
 
 // Scan LED pattern checkboxes

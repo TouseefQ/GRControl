@@ -18,6 +18,7 @@ Endpoints:
   POST /api/camera/open           → open camera
   POST /api/camera/close          → close camera
   POST /api/camera/settings       → set exposure/gain
+  POST /api/camera/capture        → save one frame to disk on demand
   POST /api/scan/start            → start a scan run
   POST /api/scan/pause            → pause
   POST /api/scan/resume           → resume
@@ -28,6 +29,7 @@ Endpoints:
 import asyncio
 import base64
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -416,6 +418,52 @@ async def camera_settings(req: CameraSettingsRequest):
     if req.reverse_x is not None or req.reverse_y is not None:
         await camera.set_reverse(req.reverse_x, req.reverse_y)
     return {"status": "ok", "info": await camera.get_info()}
+
+
+class CameraCaptureRequest(BaseModel):
+    output_folder: str = "./captures"
+    image_format: str = "tiff"
+
+
+@app.post("/api/camera/capture")
+async def camera_capture(req: CameraCaptureRequest):
+    """Save a single frame to disk on demand (the UI 'Save Image' button).
+    Works whether the preview is idle or a live MJPEG stream is running — it
+    grabs its own frame from the camera. Saved RAW (no white balance) to the
+    configured output folder in the selected format, with a JSON sidecar of
+    the current encoder readings. Refuses while a scan owns the camera."""
+    if not camera.is_open:
+        raise HTTPException(503, "Camera not open")
+    if scan_ctrl._progress.running:
+        raise HTTPException(409, "Scan in progress — camera is busy")
+
+    fmt = (req.image_format or "tiff").lower()
+    if fmt not in ("tiff", "png", "jpeg", "jpg", "bmp"):
+        fmt = "tiff"
+    folder = req.output_folder.strip() or "./captures"
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    path = f"{folder}/capture_{ts}.{fmt}"
+
+    enc = device_state.encoder
+    metadata = {
+        "timestamp": datetime.now().isoformat(timespec="milliseconds"),
+        "source": "manual_capture",
+        "image_format": fmt,
+        "enc_camera_deg": enc.camera_deg,
+        "enc_led_arc_deg": enc.led_arc_deg,
+        "enc_motor1_deg": enc.motor1_deg,
+        "enc_motor2_deg": enc.motor2_deg,
+    }
+    saved = await camera.capture(path, fmt, metadata)
+    if not saved:
+        raise HTTPException(500, "Capture failed")
+
+    # Push a thumbnail into the Captured Images gallery, same as scan captures.
+    jpeg = await camera.grab_preview_jpeg()
+    if jpeg:
+        await _broadcast({"event": "image_captured", "path": saved,
+                          "preview_b64": base64.b64encode(jpeg).decode()})
+    return {"status": "saved", "path": saved}
 
 
 @app.get("/api/camera/preview")

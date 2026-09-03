@@ -260,15 +260,16 @@ class IDSCamera:
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Save image. Route through NumPy when a software transform is needed
-        # (gray-world WB and/or flip); otherwise let the SDK write it natively.
-        if self._wb_software or self._flip_x or self._flip_y:
+        # Save image. Captures stay RAW — no white balance is applied, so the
+        # saved pixels keep their true radiometric values for quantitative
+        # measurement (per-frame WB would vary gains across scan positions and
+        # break comparability). Only geometric flips (lossless reorientation)
+        # are applied; those go through NumPy, otherwise the SDK writes natively.
+        if self._flip_x or self._flip_y:
             from PIL import Image as PILImage
             arr = self._ipl_to_numpy(ipl_image)
             if arr.ndim == 3 and arr.shape[2] >= 3:
                 arr = arr[..., [2, 1, 0]]
-            if self._wb_software:
-                arr = self._apply_gray_world_wb(arr)
             if self._flip_x:
                 arr = arr[:, ::-1]
             if self._flip_y:
