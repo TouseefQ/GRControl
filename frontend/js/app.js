@@ -376,6 +376,10 @@ function setCameraOpen(info) {
   camLabel.textContent = `Camera: ${info?.model || "Open"}`;
   document.getElementById("btn-cam-open").classList.add("hidden");
   document.getElementById("btn-cam-close").classList.remove("hidden");
+  // Camera is open but no MJPEG stream running yet — invite the user to it.
+  // startLive() hides the placeholder once the stream begins.
+  const ph = document.getElementById("camera-placeholder");
+  if (!liveOn) ph.textContent = "Live Preview Available";
 }
 
 function setCameraClosed() {
@@ -385,7 +389,9 @@ function setCameraClosed() {
   document.getElementById("btn-cam-open").classList.remove("hidden");
   document.getElementById("btn-cam-close").classList.add("hidden");
   document.getElementById("camera-preview").classList.add("hidden");
-  document.getElementById("camera-placeholder").classList.remove("hidden");
+  const ph = document.getElementById("camera-placeholder");
+  ph.textContent = "Camera not open";
+  ph.classList.remove("hidden");
 }
 
 on("camera_opened", (msg) => { setCameraOpen(msg.info); logOk(`Camera opened: ${msg.info?.model}`); });
@@ -396,6 +402,13 @@ document.getElementById("btn-cam-open").addEventListener("click", async () => {
     const res = await api.cameraOpen();
     setCameraOpen(res.info);
     logOk("Camera opened");
+    // Apply the gain shown in the control (default 10) so the hardware starts
+    // at a known value rather than whatever it powered up with.
+    const gain = parseFloat(document.getElementById("cam-gain").value);
+    if (!Number.isNaN(gain)) {
+      await api.cameraSettings(null, gain);
+      logOk(`Gain set to ${gain}`);
+    }
   } catch (e) { logErr(`Camera open failed: ${e.message}`); }
 });
 
