@@ -195,8 +195,17 @@ class IDSCamera:
             )
         if arr.dtype != np.uint16:
             arr = arr.astype(np.uint16)
+        # Little-endian, contiguous — required for a clean 16-bit write.
+        arr = np.ascontiguousarray(arr, dtype="<u2")
+        h, w = arr.shape
         # mode 'I;16' → single-channel 16-bit TIFF; the low 12 bits hold data.
-        PILImage.fromarray(arr, mode="I;16").save(output_path, format="TIFF")
+        # fromarray with an explicit mode is rejected by some Pillow builds
+        # (stride/endianness checks), so fall back to frombytes.
+        try:
+            img = PILImage.fromarray(arr, mode="I;16")
+        except Exception:
+            img = PILImage.frombytes("I;16", (w, h), arr.tobytes())
+        img.save(output_path, format="TIFF")
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -219,7 +228,7 @@ class IDSCamera:
         except Exception:
             entries = []
 
-        for entry in ("Continuous", "Once"):
+        for entry in ("Once", "Continuous"):
             if entries and entry not in entries:
                 continue
             try:
@@ -231,6 +240,25 @@ class IDSCamera:
 
         log.warning("Hardware auto white balance unavailable — using software gray-world WB")
         self._wb_software = True
+
+    def _setup_manual_exposure(self):
+        """Turn OFF auto-exposure and auto-gain so brightness is fixed and
+        user-controlled (via the Exposure/Gain tab). Auto modes re-evaluate
+        every frame, which makes the live preview pulse bright/dark and — worse
+        for a gonioreflectometer — would vary the exposure between scan
+        positions, destroying the radiometric comparability of the captures.
+        Node names are model-specific, so this is best-effort."""
+        nm = self._node_map
+        for node_name in ("ExposureAuto", "GainAuto"):
+            try:
+                node = nm.FindNode(node_name)
+            except Exception:
+                continue
+            try:
+                node.SetCurrentEntry("Off")
+                log.info("%s = Off (manual)", node_name)
+            except Exception as e:
+                log.warning("%s=Off failed: %s", node_name, e)
 
     def _setup_raw_bayer_format(self):
         """Put the sensor into a raw 12-bit Bayer pixel format so TIFF captures
@@ -294,11 +322,21 @@ class IDSCamera:
         # to a software gray-world correction if the camera has no auto-WB node.
         self._setup_white_balance()
 
+        # Fixed exposure/gain (no auto hunting → stable brightness, comparable
+        # captures). Do this before locking parameters / starting acquisition.
+        self._setup_manual_exposure()
+
         # Raw 12-bit Bayer for capture (must precede PayloadSize/buffer sizing).
         self._setup_raw_bayer_format()
 
         payload_size = self._node_map.FindNode("PayloadSize").Value()
-        for _ in range(self._data_stream.NumBuffersAnnouncedMinRequired()):
+        # Allocate several buffers, not just the bare minimum. With only 1–2
+        # buffers the host has no double-buffering headroom, so at the higher
+        # 12-bit data rate frames get overwritten mid-transfer — which shows up
+        # as torn frames (one half bright, one half dark) and flicker in the
+        # preview. A small pool absorbs the jitter.
+        num_buffers = max(self._data_stream.NumBuffersAnnouncedMinRequired(), 8)
+        for _ in range(num_buffers):
             buf = self._data_stream.AllocAndAnnounceBuffer(payload_size)
             self._data_stream.QueueBuffer(buf)
 
@@ -407,7 +445,7 @@ class IDSCamera:
                 metadata,
             )
         except Exception as e:
-            log.error("Capture failed: %s", e)
+            log.exception("Capture failed: %s", e)
             return None
 
     # ── Preview (JPEG thumbnail for browser) ─────────────────────────────────
