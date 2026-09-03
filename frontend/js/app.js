@@ -617,9 +617,10 @@ document.getElementById("btn-scan-start").addEventListener("click", async () => 
   };
 
   try {
-    await api.scanStart(config);
+    const res = await api.scanStart(config);
     setScanRunning(true, false);
     logOk("Scan started");
+    if (res && res.skipped) logWarn(res.skipped_message);
   } catch (e) {
     logErr(`Scan start failed: ${e.message}`);
   }

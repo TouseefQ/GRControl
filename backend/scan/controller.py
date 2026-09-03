@@ -145,7 +145,11 @@ class ScanController:
         cam_positions = cfg.camera_axis.positions
         active_leds = [i for i, en in enumerate(cfg.led_pattern.enabled) if en]
 
-        total = len(led_positions) * len(cam_positions) * len(active_leds)
+        # Positions where the LED arc would block the lens are skipped, not
+        # scanned. Size the total to only the pairs we will actually capture.
+        occluded = set(self.occluded_positions(cfg))
+        scanned_pairs = len(led_positions) * len(cam_positions) - len(occluded)
+        total = scanned_pairs * len(active_leds)
         self._progress = ScanProgress(
             running=True,
             total_positions=total,
@@ -153,6 +157,9 @@ class ScanController:
             images_captured=0,
         )
         await self._emit_progress()
+        if occluded:
+            log.info("Skipping %d occluded position(s) within the %g° camera keep-out",
+                     len(occluded), self.keepout_deg(cfg))
 
         # Ensure output folder exists
         Path(cfg.output_folder).mkdir(parents=True, exist_ok=True)
@@ -160,6 +167,9 @@ class ScanController:
         try:
             for led_pos in led_positions:
                 for cam_pos in cam_positions:
+                    if (led_pos, cam_pos) in occluded:
+                        continue  # LED arc blocks the lens here — skip
+
                     # Pause check
                     while self._progress.paused:
                         await asyncio.sleep(0.1)

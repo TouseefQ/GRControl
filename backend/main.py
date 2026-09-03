@@ -514,24 +514,35 @@ async def camera_stream():
 
 @app.post("/api/scan/start")
 async def scan_start(config: ScanConfig):
-    # Occlusion guard: refuse to start if any grid position would put the LED
-    # arc in front of the lens (|θcam − θled| < keep-out). No silent data gaps.
+    # Occlusion guard: positions where the LED arc would sit in front of the
+    # lens (|θcam − θled| < keep-out) are skipped, not scanned — the controller
+    # drops them and captures the rest. Only refuse outright if EVERY grid
+    # position is occluded, since then there is nothing to capture.
     blocked = scan_ctrl.occluded_positions(config)
-    if blocked:
+    total_pairs = len(config.led_axis.positions) * len(config.camera_axis.positions)
+    if blocked and len(blocked) >= total_pairs:
         keepout = scan_ctrl.keepout_deg(config)
-        sample = ", ".join(f"LED {l:g}°/CAM {c:g}°" for l, c in blocked[:5])
-        more = "" if len(blocked) <= 5 else f" (+{len(blocked) - 5} more)"
         raise HTTPException(
             422,
-            f"{len(blocked)} scan position(s) would put the LED arc within the "
-            f"{keepout:g}° camera keep-out — the arc blocks the lens's view of the "
-            f"sample. Offending: {sample}{more}. Adjust the angle ranges, or lower "
-            f"the keep-out angle (set to 0 to disable the guard).",
+            f"All {total_pairs} scan position(s) fall within the {keepout:g}° "
+            f"camera keep-out — the LED arc would block the lens's view of the "
+            f"sample at every position. Widen the angle ranges, or lower the "
+            f"keep-out angle (set to 0 to disable the guard).",
         )
     ok = await scan_ctrl.start(config)
     if not ok:
         raise HTTPException(409, "Scan already running")
-    return {"status": "started"}
+    resp = {"status": "started"}
+    if blocked:
+        keepout = scan_ctrl.keepout_deg(config)
+        sample = ", ".join(f"LED {l:g}°/CAM {c:g}°" for l, c in blocked[:5])
+        more = "" if len(blocked) <= 5 else f" (+{len(blocked) - 5} more)"
+        resp["skipped"] = len(blocked)
+        resp["skipped_message"] = (
+            f"{len(blocked)} position(s) skipped — within the {keepout:g}° camera "
+            f"keep-out (LED arc blocks the lens): {sample}{more}"
+        )
+    return resp
 
 
 @app.post("/api/scan/pause")
