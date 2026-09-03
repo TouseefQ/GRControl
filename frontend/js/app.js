@@ -412,6 +412,18 @@ document.getElementById("btn-cam-settings").addEventListener("click", async () =
   logOk(`Camera settings: exposure=${exp}µs gain=${gain}`);
 });
 
+document.getElementById("btn-cam-flip-x")?.addEventListener("click", async () => {
+  const checked = document.getElementById("cam-flip-x").checked;
+  await api.cameraSettings(null, null, checked, null);
+  logOk(`Mirror X: ${checked}`);
+});
+
+document.getElementById("btn-cam-flip-y")?.addEventListener("click", async () => {
+  const checked = document.getElementById("cam-flip-y").checked;
+  await api.cameraSettings(null, null, null, checked);
+  logOk(`Flip Y: ${checked}`);
+});
+
 // ── Live preview (MJPEG stream) ───────────────────────────────────────────────
 let liveOn = false;
 

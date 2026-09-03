@@ -84,7 +84,7 @@ class IDSCamera:
         image = self._ids_ipl_ext.BufferToImage(raw_buffer)
         # ConvertTo(format, mode) returns a freshly-allocated image, so it is
         # safe to requeue the underlying buffer immediately afterwards.
-        converted = image.ConvertTo(ipl.PixelFormatName_BGRa8, ipl.ConversionMode_Fast)
+        converted = image.ConvertTo(ipl.PixelFormatName_BGRa8, ipl.ConversionMode_HQ)
         self._data_stream.QueueBuffer(raw_buffer)
         return converted
 
@@ -312,6 +312,22 @@ class IDSCamera:
         if self._open:
             await asyncio.get_event_loop().run_in_executor(
                 _executor, self._set_gain, gain
+            )
+
+    def _set_reverse(self, reverse_x: Optional[bool], reverse_y: Optional[bool]):
+        for node_name, value in (("ReverseX", reverse_x), ("ReverseY", reverse_y)):
+            if value is None:
+                continue
+            try:
+                self._node_map.FindNode(node_name).SetValue(value)
+            except Exception as e:
+                log.warning("set %s failed: %s", node_name, e)
+
+    async def set_reverse(self, reverse_x: Optional[bool] = None,
+                          reverse_y: Optional[bool] = None):
+        if self._open:
+            await asyncio.get_event_loop().run_in_executor(
+                _executor, self._set_reverse, reverse_x, reverse_y
             )
 
     @property

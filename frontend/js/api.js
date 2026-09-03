@@ -118,11 +118,14 @@ export async function cameraClose() {
   await fetch(`${BASE}/api/camera/close`, { method: "POST" });
 }
 
-export async function cameraSettings(exposure_us, gain) {
+export async function cameraSettings(exposure_us, gain, reverse_x = null, reverse_y = null) {
+  const body = { exposure_us, gain };
+  if (reverse_x !== null) body.reverse_x = reverse_x;
+  if (reverse_y !== null) body.reverse_y = reverse_y;
   const r = await fetch(`${BASE}/api/camera/settings`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ exposure_us, gain }),
+    body: JSON.stringify(body),
   });
   return r.json();
 }

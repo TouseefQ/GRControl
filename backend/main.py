@@ -381,6 +381,8 @@ async def led_off():
 class CameraSettingsRequest(BaseModel):
     exposure_us: Optional[float] = None
     gain: Optional[float] = None
+    reverse_x: Optional[bool] = None  # True = mirror horizontally
+    reverse_y: Optional[bool] = None  # True = flip vertically
 
 
 @app.post("/api/camera/open")
@@ -411,6 +413,8 @@ async def camera_settings(req: CameraSettingsRequest):
         await camera.set_exposure(req.exposure_us)
     if req.gain is not None:
         await camera.set_gain(req.gain)
+    if req.reverse_x is not None or req.reverse_y is not None:
+        await camera.set_reverse(req.reverse_x, req.reverse_y)
     return {"status": "ok", "info": await camera.get_info()}
 
 
