@@ -39,6 +39,7 @@ class IDSCamera:
         self._flip_y = False
         self._conv_mode = None       # cached Bayer→BGRa8 conversion mode
         self._wb_software = False     # software gray-world WB fallback active?
+        self._pixel_format = None     # active PixelFormat symbolic name (raw depth)
 
     @staticmethod
     def _ensure_gentl_path():
@@ -121,6 +122,92 @@ class IDSCamera:
         rgb *= gains
         return np.clip(rgb, 0, 255).astype(np.uint8)
 
+    def _current_pixel_format(self) -> Optional[str]:
+        try:
+            return self._node_map.FindNode("PixelFormat").CurrentEntry().SymbolicValue()
+        except Exception:
+            return None
+
+    def _setup_raw_bayer_12(self):
+        """Switch the sensor to an *unpacked* 12-bit Bayer format so TIFF
+        captures preserve the full sensor depth (0–4095) as a single-channel
+        16-bit mosaic. Enumerate what the camera offers, log it, and prefer an
+        unpacked ``BayerRG12`` (16-bit container — trivial to write as a 16-bit
+        TIFF and to debayer offline); fall back to any 12-bit Bayer, else leave
+        the default. MUST run before PayloadSize is read (the buffer size and
+        stream bandwidth both depend on the pixel format)."""
+        nm = self._node_map
+        try:
+            node = nm.FindNode("PixelFormat")
+            entries = [e.SymbolicValue() for e in node.Entries() if e.IsAvailable()]
+        except Exception as e:
+            log.warning("PixelFormat enumerate failed (%s) — keeping default", e)
+            self._pixel_format = self._current_pixel_format()
+            return
+
+        log.info("PixelFormat entries: %s", entries)
+        bayer12 = [s for s in entries if s.startswith("Bayer") and "12" in s]
+        # Unpacked names end in the bare bit count ("BayerRG12"); packed variants
+        # carry a suffix ("BayerRG12p", "BayerRG12g24IDS") and are skipped here.
+        unpacked = [s for s in bayer12 if s.endswith("12")]
+        choice = (unpacked or bayer12 or [None])[0]
+        if not choice:
+            log.warning("No 12-bit Bayer format offered — keeping default (%s)",
+                        self._current_pixel_format())
+            self._pixel_format = self._current_pixel_format()
+            return
+        try:
+            node.SetCurrentEntry(choice)
+            self._pixel_format = choice
+            log.info("PixelFormat = %s (raw 12-bit%s)", choice,
+                     "" if choice.endswith("12") else ", packed — will repack on save")
+        except Exception as e:
+            log.warning("Set PixelFormat=%s failed: %s — keeping default", choice, e)
+            self._pixel_format = self._current_pixel_format()
+
+    def _save_raw_bayer_tiff(self, raw_buffer, output_path: str):
+        """Save the finished buffer as a single-channel 16-bit TIFF holding the
+        true sensor mosaic (0–4095, left-justified in a 16-bit word). No
+        debayering, no white balance, no colour conversion — the CFA phase is
+        recorded in the sidecar so the analysis tool can debayer with its own
+        gains. Always requeues the buffer (finally) so a save error can't leak
+        it. Geometric flips are intentionally NOT applied here: flipping a Bayer
+        mosaic shifts its CFA phase, which would desync it from the recorded
+        pixel_format — reorient in analysis instead."""
+        import numpy as np
+        from PIL import Image as PILImage
+        ipl = self._ids_ipl
+        try:
+            image = self._ids_ipl_ext.BufferToImage(raw_buffer)
+            fmt = self._pixel_format or ""
+            # If the active format is a packed 12-bit Bayer, repack (not
+            # debayer) to the unpacked variant of the same phase — lossless.
+            if fmt.startswith("Bayer") and "12" in fmt and not fmt.endswith("12"):
+                phase = fmt[5:7]
+                target = getattr(ipl, f"PixelFormatName_Bayer{phase}12", None)
+                if target is not None:
+                    try:
+                        image = image.ConvertTo(target, ipl.ConversionMode_Fast)
+                    except Exception as e:
+                        log.warning("Repack packed→unpacked Bayer12 failed: %s", e)
+            arr = np.array(self._ipl_to_numpy(image))  # copy out before requeue
+        finally:
+            self._data_stream.QueueBuffer(raw_buffer)
+
+        if arr.ndim == 3 and arr.shape[-1] == 1:
+            arr = arr[..., 0]
+        if arr.ndim != 2:
+            raise RuntimeError(
+                f"Raw Bayer frame is not 2-D (shape {arr.shape}, fmt {self._pixel_format})")
+        arr = np.ascontiguousarray(arr, dtype="<u2")
+        h, w = arr.shape
+        try:
+            img = PILImage.fromarray(arr, mode="I;16")
+        except Exception:
+            # Some Pillow builds mis-handle fromarray for I;16 — go via raw bytes.
+            img = PILImage.frombytes("I;16", (w, h), arr.tobytes())
+        img.save(output_path, format="TIFF")
+
     def _save_image(self, image, output_path: str, fmt: str):
         """Save an IPL image. JPG/PNG/BMP are written natively by the SDK
         (format inferred from the file extension); TIFF (and any format the
@@ -201,8 +288,16 @@ class IDSCamera:
         # to a software gray-world correction if the camera has no auto-WB node.
         self._setup_white_balance()
 
+        # Switch to an unpacked 12-bit Bayer format for full-depth raw TIFFs.
+        # Must precede PayloadSize (buffer size depends on the pixel format).
+        self._setup_raw_bayer_12()
+
         payload_size = self._node_map.FindNode("PayloadSize").Value()
-        for _ in range(self._data_stream.NumBuffersAnnouncedMinRequired()):
+        # 12-bit frames are ~2× the size of the 8-bit ones, so give the stream
+        # extra buffers (min 8) — starved buffers are what cause torn/half-dark
+        # frames while the preview consumer is busy encoding JPEG.
+        num_buffers = max(self._data_stream.NumBuffersAnnouncedMinRequired(), 8)
+        for _ in range(num_buffers):
             buf = self._data_stream.AllocAndAnnounceBuffer(payload_size)
             self._data_stream.QueueBuffer(buf)
 
@@ -250,9 +345,6 @@ class IDSCamera:
     # ── Capture ───────────────────────────────────────────────────────────────
 
     def _capture_frame(self, output_path: str, image_format: str, metadata: dict) -> str:
-        raw_buffer = self._data_stream.WaitForFinishedBuffer(5000)
-        ipl_image = self._buffer_to_color_image(raw_buffer)
-
         fmt = image_format.lower()
         if fmt not in ("tiff", "png", "bmp", "jpeg", "jpg"):
             fmt = "tiff"
@@ -260,26 +352,37 @@ class IDSCamera:
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Save image. Captures stay RAW — no white balance is applied, so the
-        # saved pixels keep their true radiometric values for quantitative
-        # measurement (per-frame WB would vary gains across scan positions and
-        # break comparability). Only geometric flips (lossless reorientation)
-        # are applied; those go through NumPy, otherwise the SDK writes natively.
-        if self._flip_x or self._flip_y:
-            from PIL import Image as PILImage
-            arr = self._ipl_to_numpy(ipl_image)
-            if arr.ndim == 3 and arr.shape[2] >= 3:
-                arr = arr[..., [2, 1, 0]]
-            if self._flip_x:
-                arr = arr[:, ::-1]
-            if self._flip_y:
-                arr = arr[::-1]
-            pil_img = PILImage.fromarray(arr[..., :3].copy())
-            fmt_map = {"jpeg": "JPEG", "jpg": "JPEG", "png": "PNG", "bmp": "BMP", "tiff": "TIFF"}
-            save_kw = {"quality": 95} if fmt in ("jpeg", "jpg") else {}
-            pil_img.save(str(path), format=fmt_map.get(fmt, "TIFF"), **save_kw)
+        raw_buffer = self._data_stream.WaitForFinishedBuffer(5000)
+
+        if fmt == "tiff":
+            # Full-depth raw Bayer mosaic — single-channel 16-bit, no debayer /
+            # WB / colour conversion, so the pixels keep their true sensor
+            # values (0–4095) for quantitative measurement. Debayer offline.
+            # _save_raw_bayer_tiff requeues the buffer itself (finally).
+            self._save_raw_bayer_tiff(raw_buffer, str(path))
+            metadata.setdefault("pixel_format", self._pixel_format)
+            metadata.setdefault("raw_bayer", True)
+            metadata.setdefault("bit_depth", 12)
+            metadata.setdefault("white_balance", "none (raw mosaic)")
         else:
-            self._save_image(ipl_image, str(path), fmt)
+            # Viewable colour formats: debayer to BGRa8. Still RAW radiometrically
+            # (no white balance) — only geometric flips are applied.
+            ipl_image = self._buffer_to_color_image(raw_buffer)
+            if self._flip_x or self._flip_y:
+                from PIL import Image as PILImage
+                arr = self._ipl_to_numpy(ipl_image)
+                if arr.ndim == 3 and arr.shape[2] >= 3:
+                    arr = arr[..., [2, 1, 0]]
+                if self._flip_x:
+                    arr = arr[:, ::-1]
+                if self._flip_y:
+                    arr = arr[::-1]
+                pil_img = PILImage.fromarray(arr[..., :3].copy())
+                fmt_map = {"jpeg": "JPEG", "jpg": "JPEG", "png": "PNG", "bmp": "BMP"}
+                save_kw = {"quality": 95} if fmt in ("jpeg", "jpg") else {}
+                pil_img.save(str(path), format=fmt_map.get(fmt, "PNG"), **save_kw)
+            else:
+                self._save_image(ipl_image, str(path), fmt)
 
         # Save sidecar metadata JSON
         meta_path = path.with_suffix(".json")
