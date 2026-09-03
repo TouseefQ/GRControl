@@ -87,7 +87,7 @@ class IDSCamera:
         mode = getattr(ipl, "ConversionMode_HQ",
                        getattr(ipl, "ConversionMode_HighQuality",
                                ipl.ConversionMode_Fast))
-        log.debug("Bayer conversion mode: %s", mode)
+        log.info("Bayer conversion mode: %s", mode)
         converted = image.ConvertTo(ipl.PixelFormatName_BGRa8, mode)
         self._data_stream.QueueBuffer(raw_buffer)
         return converted
@@ -142,6 +142,14 @@ class IDSCamera:
         # Free-running acquisition (no external/software trigger).
         try:
             self._node_map.FindNode("TriggerMode").SetCurrentEntry("Off")
+        except Exception:
+            pass
+
+        # Auto white balance — matches IDS Cockpit behaviour and eliminates
+        # the green cast that manual/default WB produces on Bayer sensors.
+        try:
+            self._node_map.FindNode("BalanceWhiteAuto").SetCurrentEntry("Continuous")
+            log.info("Auto white balance enabled")
         except Exception:
             pass
 
@@ -242,19 +250,24 @@ class IDSCamera:
             raw_buffer = self._data_stream.WaitForFinishedBuffer(2000)
             ipl_image = self._buffer_to_color_image(raw_buffer)
 
-            arr = self._ipl_to_numpy(ipl_image)
-            # arr is BGRa8 — reorder to RGB and drop alpha for Pillow
-            if arr.ndim == 3 and arr.shape[2] >= 3:
-                arr = arr[..., [2, 1, 0, *range(3, arr.shape[2])]][..., :3]
-            pil_img = PILImage.fromarray(arr)
-
+            # Scale in SDK space first (native code on the full-res IPL image),
+            # so the numpy copy and Pillow JPEG encode work on a small array.
             PREVIEW_W = 640
-            if pil_img.width > PREVIEW_W:
-                h = max(1, round(pil_img.height * PREVIEW_W / pil_img.width))
-                pil_img = pil_img.resize((PREVIEW_W, h), PILImage.BILINEAR)
+            src_w, src_h = ipl_image.Width(), ipl_image.Height()
+            if src_w > PREVIEW_W:
+                size = ipl.Size2D()
+                size.width = PREVIEW_W
+                size.height = max(1, round(src_h * PREVIEW_W / src_w))
+                small = ipl_image.Scale(size)
+            else:
+                small = ipl_image
 
+            arr = self._ipl_to_numpy(small)
+            # BGRa8 → RGB: select channels [2,1,0] = R,G,B (alpha ignored)
+            if arr.ndim == 3 and arr.shape[2] >= 3:
+                arr = arr[..., [2, 1, 0]]
             buf = io.BytesIO()
-            pil_img.save(buf, format="JPEG", quality=80)
+            PILImage.fromarray(arr).save(buf, format="JPEG", quality=80)
             return buf.getvalue()
         except Exception as e:
             log.warning("Preview grab failed: %s", e)
