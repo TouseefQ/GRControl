@@ -82,9 +82,13 @@ class IDSCamera:
         BGRa8 (a new image with its own memory), then requeue the buffer."""
         ipl = self._ids_ipl
         image = self._ids_ipl_ext.BufferToImage(raw_buffer)
-        # ConvertTo(format, mode) returns a freshly-allocated image, so it is
-        # safe to requeue the underlying buffer immediately afterwards.
-        converted = image.ConvertTo(ipl.PixelFormatName_BGRa8, ipl.ConversionMode_HQ)
+        # HQ mode produces correct colour from the Bayer pattern; fall back to
+        # Fast if this SDK version doesn't expose ConversionMode_HQ.
+        mode = getattr(ipl, "ConversionMode_HQ",
+                       getattr(ipl, "ConversionMode_HighQuality",
+                               ipl.ConversionMode_Fast))
+        log.debug("Bayer conversion mode: %s", mode)
+        converted = image.ConvertTo(ipl.PixelFormatName_BGRa8, mode)
         self._data_stream.QueueBuffer(raw_buffer)
         return converted
 
