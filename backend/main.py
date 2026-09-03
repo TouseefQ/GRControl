@@ -455,7 +455,7 @@ async def camera_stream():
                     b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
                     + str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n"
                 )
-                await asyncio.sleep(0.04)  # cap rate; real fps limited by grab cost
+                await asyncio.sleep(0)  # yield event loop; real fps limited by grab cost
 
     return StreamingResponse(
         gen(), media_type="multipart/x-mixed-replace; boundary=frame"

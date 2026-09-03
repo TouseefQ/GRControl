@@ -236,34 +236,26 @@ class IDSCamera:
 
     def _grab_preview_jpeg(self) -> Optional[bytes]:
         try:
+            import io
+            from PIL import Image as PILImage
             ipl = self._ids_ipl
             raw_buffer = self._data_stream.WaitForFinishedBuffer(2000)
             ipl_image = self._buffer_to_color_image(raw_buffer)
 
-            # Scale down to ~640px wide for preview. IPL's Scale() takes a
-            # Size2D of target *pixel dimensions* (not scale factors); Size2D
-            # is built via its settable width/height properties.
-            PREVIEW_W = 640
-            src_w, src_h = ipl_image.Width(), ipl_image.Height()
-            if src_w > PREVIEW_W:
-                size = ipl.Size2D()
-                size.width = PREVIEW_W
-                size.height = max(1, round(src_h * PREVIEW_W / src_w))
-                small = ipl_image.Scale(size)
-            else:
-                small = ipl_image
+            arr = self._ipl_to_numpy(ipl_image)
+            # arr is BGRa8 — reorder to RGB and drop alpha for Pillow
+            if arr.ndim == 3 and arr.shape[2] >= 3:
+                arr = arr[..., [2, 1, 0, *range(3, arr.shape[2])]][..., :3]
+            pil_img = PILImage.fromarray(arr)
 
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                tmp_path = tmp.name
-            try:
-                ipl.ImageWriter.WriteAsJPG(tmp_path, small)
-                with open(tmp_path, "rb") as f:
-                    data = f.read()
-            finally:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-            return data
+            PREVIEW_W = 640
+            if pil_img.width > PREVIEW_W:
+                h = max(1, round(pil_img.height * PREVIEW_W / pil_img.width))
+                pil_img = pil_img.resize((PREVIEW_W, h), PILImage.BILINEAR)
+
+            buf = io.BytesIO()
+            pil_img.save(buf, format="JPEG", quality=80)
+            return buf.getvalue()
         except Exception as e:
             log.warning("Preview grab failed: %s", e)
             return None
