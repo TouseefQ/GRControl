@@ -402,12 +402,16 @@ document.getElementById("btn-cam-open").addEventListener("click", async () => {
     const res = await api.cameraOpen();
     setCameraOpen(res.info);
     logOk("Camera opened");
-    // Apply the gain shown in the control (default 10) so the hardware starts
-    // at a known value rather than whatever it powered up with.
+    // Apply the exposure and gain shown in the controls so the hardware starts
+    // at a known value rather than whatever the SDK powered up with.
+    const exp = parseFloat(document.getElementById("cam-exposure").value);
     const gain = parseFloat(document.getElementById("cam-gain").value);
-    if (!Number.isNaN(gain)) {
-      await api.cameraSettings(null, gain);
-      logOk(`Gain set to ${gain}`);
+    if (!Number.isNaN(exp) || !Number.isNaN(gain)) {
+      await api.cameraSettings(
+        Number.isNaN(exp) ? null : exp,
+        Number.isNaN(gain) ? null : gain
+      );
+      logOk(`Camera settings applied: exposure=${exp}µs gain=${gain}`);
     }
   } catch (e) { logErr(`Camera open failed: ${e.message}`); }
 });
