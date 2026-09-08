@@ -490,11 +490,13 @@ async def camera_stream():
         raise HTTPException(409, "Live preview already active")
 
     async def gen():
+        loop = asyncio.get_event_loop()
         async with _preview_stream_lock:
             while camera.is_open:
                 if scan_ctrl._progress.running:
                     await asyncio.sleep(0.2)  # yield the camera to the scan
                     continue
+                t0 = loop.time()
                 jpeg = await camera.grab_preview_jpeg()
                 if not jpeg:
                     await asyncio.sleep(0.1)
@@ -503,7 +505,8 @@ async def camera_stream():
                     b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
                     + str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n"
                 )
-                await asyncio.sleep(0)  # yield event loop; real fps limited by grab cost
+                # Cap at ~15 fps; if grab took longer, sleep(0) just yields the loop.
+                await asyncio.sleep(max(0.0, 1 / 15 - (loop.time() - t0)))
 
     return StreamingResponse(
         gen(), media_type="multipart/x-mixed-replace; boundary=frame"

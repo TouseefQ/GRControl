@@ -322,10 +322,11 @@ class IDSCamera:
         self._setup_raw_bayer_12()
 
         payload_size = self._node_map.FindNode("PayloadSize").Value()
-        # 12-bit frames are ~2× the size of the 8-bit ones, so give the stream
-        # extra buffers (min 8) — starved buffers are what cause torn/half-dark
-        # frames while the preview consumer is busy encoding JPEG.
-        num_buffers = max(self._data_stream.NumBuffersAnnouncedMinRequired(), 8)
+        # 12-bit packed frames are ~2× the bytes of 8-bit. Allocate at least 16
+        # buffers so a slow preview encode (200–500 ms on a laptop) never exhausts
+        # the queue and forces the camera to overwrite an in-use buffer — which
+        # is what produces the torn/half-dark frames.
+        num_buffers = max(self._data_stream.NumBuffersAnnouncedMinRequired(), 16)
         for _ in range(num_buffers):
             buf = self._data_stream.AllocAndAnnounceBuffer(payload_size)
             self._data_stream.QueueBuffer(buf)
@@ -381,7 +382,16 @@ class IDSCamera:
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        raw_buffer = self._data_stream.WaitForFinishedBuffer(5000)
+        # Discard incomplete (torn) buffers — rare, but possible if the preview
+        # consumer was briefly starving the queue. Retry up to 3 times.
+        for attempt in range(3):
+            raw_buffer = self._data_stream.WaitForFinishedBuffer(5000)
+            if not getattr(raw_buffer, "IsIncomplete", lambda: False)():
+                break
+            log.warning("Capture: incomplete buffer (attempt %d), retrying", attempt + 1)
+            self._data_stream.QueueBuffer(raw_buffer)
+        else:
+            raise RuntimeError("Could not obtain a complete frame after 3 attempts")
 
         if fmt == "tiff":
             # Full-depth raw Bayer mosaic — single-channel 16-bit, no debayer /
@@ -458,8 +468,24 @@ class IDSCamera:
             import io
             from PIL import Image as PILImage
             ipl = self._ids_ipl
+
+            # Drain any stale frames: slow conversion lets buffers pile up,
+            # then they all drain in a burst → flicker.  Always grab the
+            # freshest frame available before starting the expensive decode.
             raw_buffer = self._data_stream.WaitForFinishedBuffer(2000)
-            ipl_image = self._buffer_to_color_image(raw_buffer)
+            while True:
+                try:
+                    stale = self._data_stream.WaitForFinishedBuffer(5)
+                    self._data_stream.QueueBuffer(raw_buffer)
+                    raw_buffer = stale
+                except Exception:
+                    break  # queue empty — raw_buffer is the newest frame
+
+            # ConversionMode_Fast: ~3× cheaper than HighQuality, no visible
+            # difference at 640px preview resolution.
+            image = self._ids_ipl_ext.BufferToImage(raw_buffer)
+            ipl_image = image.ConvertTo(ipl.PixelFormatName_BGRa8, ipl.ConversionMode_Fast)
+            self._data_stream.QueueBuffer(raw_buffer)
 
             # Scale in SDK space first (native code on the full-res IPL image),
             # so the numpy copy and Pillow JPEG encode work on a small array.
