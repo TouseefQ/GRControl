@@ -559,7 +559,14 @@ class IDSCamera:
             )
 
     def _set_gain(self, gain: float):
-        self._node_map.FindNode("Gain").SetValue(gain)
+        node = self._node_map.FindNode("Gain")
+        try:
+            lo = node.Minimum()
+            hi = node.Maximum()
+            gain = max(lo, min(hi, gain))
+        except Exception:
+            pass
+        node.SetValue(gain)
 
     async def set_gain(self, gain: float):
         if self._open:
