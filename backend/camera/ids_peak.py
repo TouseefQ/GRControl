@@ -481,10 +481,11 @@ class IDSCamera:
                 except Exception:
                     break  # queue empty — raw_buffer is the newest frame
 
-            # ConversionMode_Fast: ~3× cheaper than HighQuality, no visible
-            # difference at 640px preview resolution.
+            # ConversionMode_Fast doesn't handle the IDS packed Bayer format
+            # correctly on this camera — produces a black frame. Use the same
+            # mode as captures (HighQuality if available, else Fast).
             image = self._ids_ipl_ext.BufferToImage(raw_buffer)
-            ipl_image = image.ConvertTo(ipl.PixelFormatName_BGRa8, ipl.ConversionMode_Fast)
+            ipl_image = image.ConvertTo(ipl.PixelFormatName_BGRa8, self._resolve_conv_mode())
             self._data_stream.QueueBuffer(raw_buffer)
 
             # Scale in SDK space first (native code on the full-res IPL image),
