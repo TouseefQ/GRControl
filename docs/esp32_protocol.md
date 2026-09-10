@@ -1,8 +1,8 @@
 # ESP32 Communication Protocol Specification
 
 **Project:** GRControlSoftware — Gonioreflectometer Control  
-**Version:** 1.0  
-**Date:** 2026-06-14  
+**Version:** 1.1  
+**Date:** 2026-09-10  
 **Interface:** USB/Serial (115200 baud) and WiFi TCP (port 8888)
 
 ---
@@ -65,26 +65,26 @@ ESP32 replies immediately with a `STATE` message (see Section 4.1).
 
 | Field   | Type  | Range   | Description                            |
 |---------|-------|---------|----------------------------------------|
-| motor   | int   | 1 or 2  | 1 = LED arc motor, 2 = Camera motor   |
-| angle   | float | 0–360   | Target absolute angle in degrees       |
+| motor   | int   | 0, 1, 2 | 0 = both, 1 = Camera motor, 2 = LED arc motor |
+| angle   | float | absolute | Target absolute output-shaft angle in degrees. Negative or >360 values are accepted (linear absolute target) — e.g. −10 drives the arm anti-clockwise, used for the reverse camera-arc sweep |
 | speed   | int   | 1–100   | Speed as % of maximum RPM              |
 
 ESP32 replies with `ACK`, then sends `STATE` updates during motion, and a `MOVE_DONE` event on completion.
 
 ---
 
-### 3.4 JOG — Jog Motor by Relative Steps
+### 3.4 JOG — Jog Motor by Relative Degrees
 
 ```json
-{"type": "JOG", "motor": 2, "direction": 1, "steps": 50, "speed": 30}
+{"type": "JOG", "motor": 1, "direction": 1, "degrees": 5.0, "speed": 30}
 ```
 
-| Field     | Type | Range   | Description                          |
-|-----------|------|---------|--------------------------------------|
-| motor     | int  | 1 or 2  | Motor to jog                         |
-| direction | int  | 1 or -1 | 1 = positive (CW), -1 = negative    |
-| steps     | int  | 1–10000 | Number of microsteps to move         |
-| speed     | int  | 1–100   | Speed as % of maximum                |
+| Field     | Type  | Range   | Description                          |
+|-----------|-------|---------|--------------------------------------|
+| motor     | int   | 1 or 2  | Motor to jog                         |
+| direction | int   | 1 or -1 | 1 = positive (CW), -1 = negative (CCW) |
+| degrees   | float | >0      | Output-shaft degrees to move         |
+| speed     | int   | 1–100   | Speed as % of maximum                |
 
 ESP32 replies with `ACK`.
 
@@ -98,7 +98,7 @@ ESP32 replies with `ACK`.
 
 | Field | Type | Range      | Description                        |
 |-------|------|------------|------------------------------------|
-| motor | int  | 0, 1, or 2 | 0 = stop both, 1 = LED, 2 = Camera |
+| motor | int  | 0, 1, or 2 | 0 = stop both, 1 = Camera, 2 = LED arc |
 
 ESP32 replies with `ACK`.
 
@@ -173,6 +173,23 @@ Default is 100 ms (10 Hz). ESP32 replies with `ACK`.
 
 ---
 
+### 3.11 SET_CONFIG — Persist Motor Configuration
+
+```json
+{"type": "SET_CONFIG", "dir_flip_1": true, "dir_flip_2": false, "max_speed_sps": 10000, "motor_idle_ms": 3000}
+```
+
+| Field         | Type   | Description                                                       |
+|---------------|--------|-------------------------------------------------------------------|
+| dir_flip_1    | bool   | (optional) Invert Motor 1 (camera) rotation direction             |
+| dir_flip_2    | bool   | (optional) Invert Motor 2 (LED arc) rotation direction            |
+| max_speed_sps | float  | (optional) Max step rate in steps/s                               |
+| motor_idle_ms | uint32 | (optional) Idle time before the drivers auto-disable (0 = never)  |
+
+Only the fields present are applied; each is persisted to NVS so it survives a reboot. ESP32 replies with `ACK`.
+
+---
+
 ## 4. ESP32 → PC Messages
 
 ### 4.1 STATE — Periodic Telemetry
@@ -187,24 +204,34 @@ Sent automatically at the configured telemetry interval (default 100 ms).
   "enc_motor2_deg": 9.9987,
   "enc_led_arc_deg": 10.4512,
   "enc_camera_deg": 10.0103,
+  "cmd_camera_deg": 10.0,
+  "cmd_led_deg": 10.0,
   "motor1_moving": false,
   "motor2_moving": false,
   "led_states": [0, 0, 1, 0, 0, 0, 0],
-  "led_brightness": [0, 0, 200, 0, 0, 0, 0]
+  "led_brightness": [0, 0, 200, 0, 0, 0, 0],
+  "dir_flip_1": false,
+  "dir_flip_2": false,
+  "motor_idle_ms": 3000
 }
 ```
 
-| Field             | Type       | Description                                           |
-|-------------------|------------|-------------------------------------------------------|
-| ts                | uint32     | Timestamp in ms since ESP32 boot                      |
-| enc_motor1_deg    | float      | AS5600 on Motor 1 shaft (LED arc motor)               |
-| enc_motor2_deg    | float      | AS5600 on Motor 2 shaft (Camera motor)                |
-| enc_led_arc_deg   | float      | AS5600 on LED arc vertical shaft (final output)       |
-| enc_camera_deg    | float      | AksIM-4 on camera gear (final output)                 |
-| motor1_moving     | bool       | True if motor 1 is currently stepping                 |
-| motor2_moving     | bool       | True if motor 2 is currently stepping                 |
-| led_states        | int[7]     | Current on/off state of each LED                      |
-| led_brightness    | int[7]     | Current brightness of each LED                        |
+| Field             | Type          | Description                                                     |
+|-------------------|---------------|-----------------------------------------------------------------|
+| ts                | uint32        | Timestamp in ms since ESP32 boot                                |
+| enc_motor1_deg    | float         | AS5600 #1 on Motor 1 (camera) shaft                             |
+| enc_motor2_deg    | float         | AS5600 #2 on Motor 2 (LED arc) shaft                            |
+| enc_led_arc_deg   | float \| null | AS5600 #3 on LED arc output shaft (final); `null` if read failed |
+| enc_camera_deg    | float \| null | OME85 on camera output gear (final); `null` if read failed      |
+| cmd_camera_deg    | float         | Commanded camera angle (from the step counter)                  |
+| cmd_led_deg       | float         | Commanded LED-arc angle (from the step counter)                 |
+| motor1_moving     | bool          | True if motor 1 (camera) is currently stepping                  |
+| motor2_moving     | bool          | True if motor 2 (LED arc) is currently stepping                 |
+| led_states        | int[7]        | Current on/off state of each LED                                |
+| led_brightness    | int[7]        | Current brightness of each LED                                  |
+| dir_flip_1        | bool          | Current direction-inversion flag for Motor 1 (camera)           |
+| dir_flip_2        | bool          | Current direction-inversion flag for Motor 2 (LED arc)          |
+| motor_idle_ms     | uint32        | Idle timeout (ms) before the stepper drivers are disabled       |
 
 ---
 
@@ -255,7 +282,7 @@ Sent when a `MOVE` command completes (motor has reached target and stopped).
 | Code | Meaning                        |
 |------|--------------------------------|
 | 1    | Encoder read failure (AS5600)  |
-| 2    | Encoder read failure (AksIM-4) |
+| 2    | Encoder read failure (OME85)   |
 | 3    | I2C bus error                  |
 | 4    | SPI bus error                  |
 | 5    | Motor driver fault             |
@@ -272,37 +299,29 @@ Sent when a `MOVE` command completes (motor has reached target and stopped).
 - Apply home offset: `angle_deg = fmod(raw_deg - home_offset + 360.0, 360.0)`
 - If two AS5600s share the same I2C bus, use an I2C multiplexer (TCA9548A) or use separate I2C buses on the ESP32 (ESP32 supports 2 hardware I2C peripherals).
 
-### AksIM-4 (BiSS-C over SPI)
+### OME85 (BiSS-C over SPI, camera output gear)
 
-- SPI Mode 0, CPOL=0, CPHA=0
-- Clock frequency: max 10 MHz (recommend 1–4 MHz for reliability)
-- Frame: `[1 start bit][1 CDS bit][18 position bits][2 status bits][6 CRC bits]`
-- Total frame: 28 bits minimum — read 4 bytes (32 bits), discard first 2 bits
-- Position bits are **MSB first**, **left-aligned**
-- Status bits: bit[1]=`nError` (active low), bit[0]=`nWarn` (active low)
-- CRC polynomial: `x^6 + x^1 + 1` (0x43), initial value 0x3F, inverted
-- Raw angle conversion: `angle = raw_18bit * 360.0 / 262144.0`
-- Apply home offset same as AS5600.
+The camera arm's final-output encoder is an **OTV Sensing OME85** absolute
+encoder, read over a BiSS-C interface on the SPI pins (via an RS422 transceiver).
+*(This replaces the AksIM-4 named in earlier revisions — that part is not used.)*
 
-```c
-// Minimal BiSS-C read sketch (ESP32 Arduino)
-uint32_t readAksIM4() {
-    uint8_t buf[4] = {0};
-    digitalWrite(CS_PIN, LOW);
-    delayMicroseconds(1);
-    SPI.transferBytes(NULL, buf, 4);
-    digitalWrite(CS_PIN, HIGH);
+- BiSS-C clock; the OME85 requires **≥ 500 kHz**. CLK is driven directly; the
+  DATA line returns through the RS422 receiver.
+- The frame carries a **17-bit position field** plus error/warning and CRC bits.
+- **CRC is currently unusable on this PCB:** the DATA line is routed through a
+  TXS0108E auto-direction level shifter whose edge accelerators corrupt the
+  trailing (EW + CRC) bits at 500 kHz. The **position field is reliable**; CRC/EW
+  are ignored until the DATA path is fixed (e.g. a 3.3 V MAX3490, or a divider).
+- **Workaround in firmware:** sample the position 15× and take the **majority
+  vote** (readings within 2 counts fold together to absorb LSB dither); the stuck
+  top bit is masked so the field is used as 16 bits.
+- Angle conversion: `angle = (position & 0xFFFF) / 65536.0 * 360.0`
+- Apply the home offset like the AS5600: `angle_deg = fmod(angle - home + 360.0, 360.0)`
+- The read is **blocking (~4 ms)** and only valid while the camera motor is
+  stationary.
 
-    // Assemble 32-bit word, skip first 2 framing bits
-    uint32_t raw = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16)
-                 | ((uint32_t)buf[2] << 8)  | buf[3];
-    uint32_t position = (raw >> 12) & 0x3FFFF; // 18-bit position
-    uint8_t  status   = (raw >> 10) & 0x03;
-    uint8_t  crc      = (raw >> 4)  & 0x3F;
-    // TODO: validate CRC before trusting position
-    return position;
-}
-```
+See `ArduinoCode/OME85-Reader/OME85-Reader.ino` and the `ome85_*` functions in
+`GRControl-Full.ino` for the reference implementation.
 
 ---
 

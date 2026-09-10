@@ -10,16 +10,16 @@ The device is housed in a 40×40×36 cm aluminium profile enclosure and contains
 
 | Component | Details |
 |---|---|
-| **LED Arc** | 7-LED strip mounted on a motorised curved arc |
+| **LED Arc** | 7 LEDs at fixed 10° spacing (0°–60°) on a motorised curved arc |
 | **Camera** | IDS U3-34L0XCP Rev.1.2 with DS-10M11-C3514 35 mm lens |
-| **Motor 1** (LED Arc) | Nema17 stepper + PoStep60-256 driver |
-| **Motor 2** (Camera) | Nema17 stepper + PoStep60-256 driver |
+| **Motor 1** (Camera) | Nema17 stepper + PoStep60-256 driver |
+| **Motor 2** (LED Arc) | Nema17 stepper + PoStep60-256 driver |
 | **LED Driver** | PCA9685 PWM controller |
 | **Controller** | ESP32 |
-| **Encoder 1** | AS5600 on Motor 1 shaft (I2C) |
-| **Encoder 2** | AS5600 on Motor 2 shaft (I2C) |
+| **Encoder 1** | AS5600 on Motor 1 (camera) shaft (I2C) |
+| **Encoder 2** | AS5600 on Motor 2 (LED arc) shaft (I2C) |
 | **Encoder 3** | AS5600 on LED arc output shaft (I2C) |
-| **Encoder 4** | AksIM-4 18-bit off-axis ring encoder on camera gear (BiSS-C over SPI) |
+| **Encoder 4** | OME85 (OTV Sensing) absolute encoder on camera output gear (BiSS-C over SPI) |
 
 Both the LED arc and camera mount are driven by geared timing belt systems sharing the same rotational axis. The dual-encoder setup (one on the motor shaft, one on the final output) allows the software to measure and display mechanical error at each position.
 
@@ -31,7 +31,8 @@ Both the LED arc and camera mount are driven by geared timing belt systems shari
 GRControlSoftware/
 ├── backend/                  # Python / FastAPI
 │   ├── main.py               # FastAPI app, REST API, WebSocket hub
-│   ├── models.py             # Data models, encoder error calculation
+│   ├── models.py             # Data models, Settings, encoder error calc
+│   ├── motion.py             # Closed-loop precise positioning (encoder-driven)
 │   ├── esp32/
 │   │   ├── connection.py     # Serial (USB) + TCP (WiFi) connection manager
 │   │   └── protocol.py       # JSON message encoder/decoder
@@ -57,7 +58,7 @@ GRControlSoftware/
 
 ---
 
-## Software Architecture
+## Component & Data-Flow Diagram
 
 ```mermaid
 flowchart TB
@@ -78,6 +79,7 @@ flowchart TB
         direction TB
         Main["main.py\nFastAPI App\nREST endpoints\nWebSocket hub"]
         Models["models.py\nPydantic Models\nEncoder error calc"]
+        Motion["motion.py\nClosed-loop\npositioning"]
         subgraph ESP32Layer["ESP32 Layer"]
             Conn["connection.py\nSerial + TCP\nmanager"]
             Proto["protocol.py\nJSON encoder/\ndecoder"]
@@ -92,9 +94,12 @@ flowchart TB
         Main --> Conn
         Main --> Cam
         Main --> Ctrl
+        Main --> Motion
         Conn --> Proto
         Ctrl --> Conn
         Ctrl --> Cam
+        Ctrl --> Motion
+        Motion --> Conn
     end
 
     subgraph ESP32["⚙️ ESP32 (Firmware)"]
@@ -104,11 +109,11 @@ flowchart TB
             E1["AS5600 #1\nMotor 1 shaft\n(I2C)"]
             E2["AS5600 #2\nMotor 2 shaft\n(I2C)"]
             E3["AS5600 #3\nLED Arc output\n(I2C)"]
-            E4["AksIM-4\nCamera gear\n(BiSS-C/SPI)"]
+            E4["OME85\nCamera gear\n(BiSS-C/SPI)"]
         end
         subgraph Actuators["Actuators"]
-            M1["Motor 1\nLED Arc\n(PoStep60-256)"]
-            M2["Motor 2\nCamera\n(PoStep60-256)"]
+            M1["Motor 1\nCamera\n(PoStep60-256)"]
+            M2["Motor 2\nLED Arc\n(PoStep60-256)"]
             LEDs["LED Strip\n7× LEDs\n(PCA9685)"]
         end
         FW --> E1 & E2 & E3 & E4
@@ -273,30 +278,38 @@ The device has no physical limit switches. Home is set by encoder reference.
 
 ### 3. Opening the Camera
 
-1. In the **Camera Control** card, click **Open Camera**.
+1. In the **Camera Control** card, click **Open Camera**. The exposure and gain shown in the controls are applied automatically on open.
 2. The LED icon next to "Camera off" turns **green** when the camera is ready.
-3. Adjust **Exposure (µs)** and **Gain** as needed, then click **Apply Settings**.
-4. Select your preferred **Image Format** (TIFF / PNG / JPEG / BMP).
-5. Set the **Output Folder** path where captured images will be saved.
-6. Click **↻ Refresh** to grab a live preview frame.
+3. Adjust **Exposure (µs)** and **Gain** as needed, then click **Apply Settings**. Use the **Mirror X** / **Flip Y** toggles (each with its own **Apply**) to reorient the preview and viewable saved images.
+4. Select your preferred **Image Format** (TIFF / PNG / JPEG / BMP) and set the **Output Folder** path where captured images are saved. These two fields are shared with scans.
+5. Preview and capture options:
+   - **▶ Live** starts a continuous MJPEG stream (click **⏸ Stop** to end it). Only one live stream runs at a time, and it pauses automatically while a scan owns the camera.
+   - **↻ Refresh** grabs a single snapshot frame.
+   - **💾 Save** writes one frame to disk on demand — whether idle or live-previewing — with a JSON sidecar of the current encoder readings.
+
+> **TIFF captures** are saved as the full-depth **16-bit raw Bayer mosaic** (sensor values 0–4095, no debayer or white balance) for quantitative work, alongside a companion 8-bit **`.png`** that is debayered and white-balanced so you can see the shot. White balance is applied to the preview/PNG only — the raw TIFF stays radiometrically unmodified.
 
 ---
 
 ### 4. Manual Motor Control
 
-Located in the **Manual Motor Control** card (at the bottom of the main panel).
+Located in the **Manual Motor Control** card (at the bottom of the main panel). **Motor 1** drives the camera arm and **Motor 2** the LED arc.
 
-**Jog** — move by a fixed number of microsteps:
-1. Enter the number of steps in the **Jog — steps** field.
+**Jog** — move by a relative amount:
+1. Enter the number of **degrees** (output-shaft) in the **Jog — degrees** field.
 2. Set the **Jog speed** with the slider.
 3. Click **◀ CCW** or **CW ▶** to jog in the desired direction.
 
 **Move to absolute angle** — move to a precise angle:
 1. Enter the target angle (0–360°) in the input field.
-2. Set the **Move speed** with the slider.
-3. Click **Go**.
+2. Tick **Precise landing (encoder closed-loop)** to nudge the motor until its output encoder reads the target within tolerance (see the note below); untick for a single open-loop move.
+3. Set the **Move speed** with the slider, then click **Go**.
+
+Each motor also has a **Reverse direction** toggle that flips its rotation sense on the ESP32.
 
 Click **⬛ Stop Motor 1/2** to halt a motor immediately. The **⬛ E-STOP** button in the top bar stops both motors and turns off all LEDs instantly.
+
+> **Precise (closed-loop) positioning** — the steppers are open-loop, so a plain move only lands *near* the target. With precise landing enabled, the software reads the absolute output encoder after the move and re-issues corrected moves until the encoder reads the target within tolerance (defaults ≈0.03° camera / ≈0.10° LED arc), then reports the achieved angle and residual.
 
 ---
 
@@ -323,17 +336,25 @@ Configure a scan in the **Scan Configuration** card.
 | Step (°) | Angular increment between positions |
 | Speed (%) | Motor speed as a percentage of maximum |
 
-**LEDs Active During Scan:** Check/uncheck individual LEDs (L1–L7) to select which ones fire at each scan position.
+**LEDs Active During Scan:** Check/uncheck individual LEDs to select which fire at each scan position. Each is labelled with its number **and** its fixed mounting angle on the arc (**L1 = 0°** … **L7 = 60°**, 10° apart).
 
-**Move both motors simultaneously:** When checked, both motors move to the next position at the same time. When unchecked, LED arc moves first, then camera.
+**Camera arc angle (°):** The slit the camera is physically mounted in on the arc (its viewing elevation), selectable in 5° steps from **20° to 55°**. It is constant for the run and recorded in every image's JSON sidecar.
+
+**Other options:**
+
+- **Move both motors simultaneously** — when checked both motors move at once; when unchecked the LED arc moves first, then the camera.
+- **Reverse (anti-clockwise) camera arc** — the camera arm only travels 0–180° clockwise from home, so viewing angles in 180–360° are reached by rotating the arm the other way. With this checked you still enter the Camera Axis as 0–180, but each position `p` is driven anti-clockwise and **recorded as its mirror `360 − p`** (0→360°, 10→350°, … 180→180°).
+- **Settle before capture (s)** — how long each LED stays lit and the arm settles before the frame is taken (default 5 s).
+- **Precise positioning (encoder closed-loop)** — apply the closed-loop encoder correction (see §4) at every scan position.
+- **Camera keep-out (°)** — skip any (LED, camera) position where the LED arc would block the lens, i.e. where `|θcam − θled|` is below this angle (0 = guard off). Skipped positions are listed beneath the counters; the scan only refuses to start if *every* position is blocked.
 
 The **Estimated positions** and **Total captures** counters update live as you adjust the parameters.
 
 Once configured, click **▶ Start Scan**. The software will:
 
-1. Move both motors to the first (LED angle, camera angle) position.
-2. For each enabled LED — turn it on, capture an image, turn it off.
-3. Move to the next position and repeat.
+1. Move both motors to the first (LED angle, camera angle) position — with closed-loop refinement if enabled.
+2. For each enabled LED — turn it on, wait the settle time, capture an image + JSON sidecar, turn it off.
+3. Move to the next position and repeat, skipping any keep-out positions.
 4. Display a progress bar and live position readout while running.
 
 Use **⏸ Pause** to hold the scan at the current position and **▶ Resume** to continue. **⬛ Abort** stops the scan immediately and turns off all LEDs.
@@ -346,10 +367,10 @@ The **Encoder Readings** card at the top of the main panel shows all four encode
 
 | Display | Encoder | Location |
 |---|---|---|
-| Motor 1 — LED Arc | AS5600 | Motor 1 shaft |
+| Motor 1 — Camera | AS5600 | Motor 1 (camera) shaft |
+| Camera Final | OME85 | Camera output gear (final output) |
+| Motor 2 — LED | AS5600 | Motor 2 (LED arc) shaft |
 | LED Arc Final | AS5600 | LED arc output shaft |
-| Motor 2 — Camera | AS5600 | Motor 2 shaft |
-| Camera Final | AksIM-4 | Camera gear (final output) |
 
 The **LED Arc Error** and **Camera Error** values show the difference between each motor shaft reading and its corresponding final output encoder. This reveals any mechanical slack or belt slippage in the drivetrain:
 
@@ -374,16 +395,23 @@ A JSON sidecar file (same name, `.json` extension) is saved alongside every imag
   "timestamp": "2026-06-14T14:23:01.123456",
   "led_target_deg": 45.0,
   "camera_target_deg": 30.0,
+  "camera_arc_angle_deg": 20.0,
+  "camera_reverse": false,
   "led_index": 2,
+  "led_angle_deg": 20.0,
   "led_brightness": 200,
   "encoder_motor1_deg": 45.0021,
   "encoder_motor2_deg": 29.9987,
   "encoder_led_arc_deg": 45.4512,
   "encoder_camera_deg": 30.0103,
   "encoder_led_error_deg": 0.4491,
-  "encoder_camera_error_deg": 0.0116
+  "encoder_camera_error_deg": 0.0116,
+  "led_residual_deg": 0.0032,
+  "camera_residual_deg": 0.0071
 }
 ```
+
+`led_target_deg` / `camera_target_deg` are the *commanded* arc rotations (when `camera_reverse` is true, `camera_target_deg` is the recorded `360 − p` viewing angle reached anti-clockwise); `camera_arc_angle_deg` is the fixed camera slit and `led_angle_deg` the fixed LED mounting angle; `*_residual_deg` are the leftover errors after closed-loop refinement (present only when precise positioning ran). TIFF captures also add `pixel_format`, `raw_bayer`, `bit_depth`, `white_balance`, and `preview_png`. Manual **💾 Save** captures write a smaller sidecar (`source: "manual_capture"`, live encoder readings, and `camera_arc_angle_deg`).
 
 Captured images appear as thumbnails in the **Captured Images** gallery. Click any thumbnail to open a full-size lightbox view.
 
@@ -397,8 +425,10 @@ The communication protocol is fully documented in [docs/esp32_protocol.md](docs/
 - All PC → ESP32 commands (MOVE, JOG, STOP, LED\_SET, SET\_HOME, etc.)
 - All ESP32 → PC messages (STATE telemetry, ACK, MOVE\_DONE, ERROR)
 - AS5600 I2C read procedure
-- AksIM-4 BiSS-C SPI decode procedure with example Arduino sketch
+- Final-output encoder BiSS-C/SPI decode procedure with example Arduino sketch
 - Watchdog and error handling rules
+
+> **Note:** `docs/esp32_protocol.md` predates two changes and needs a refresh — the camera's final-output encoder is now the **OME85** (not the AksIM-4 it still names), and it lists the motors in the reverse order (it says motor 1 = LED arc, but on the rig **motor 1 = camera, motor 2 = LED arc**). Treat the message *formats* as current, but trust this README for the encoder model and motor numbering.
 
 ---
 
