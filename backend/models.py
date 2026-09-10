@@ -160,15 +160,16 @@ class Settings(BaseSettings):
     # Both caps are applied on camera open, each guarded so a missing/immutable
     # node can't break the working open path.
     #
-    # camera_frame_rate_hz: caps AcquisitionFrameRate (0 = leave at camera max).
-    #   The live preview is already ~15 fps, so a modest cap costs nothing and
-    #   halves the bytes/s the USB link must sustain. Clamped to the camera's
-    #   own [min, max] range.
+    # camera_frame_rate_hz: caps AcquisitionFrameRate (0 = leave at camera max,
+    #   the default — on the U3-34L0XCP the max is only ~8.35 fps at 12-bit
+    #   full-frame, so there is nothing to cap and enabling it just flips the
+    #   camera into timed acquisition for no gain; left off unless a faster
+    #   camera/host genuinely needs throttling).
     # camera_throughput_limit_mbps: hard DeviceLinkThroughputLimit in MB/s
     #   (0 = leave at camera max). Set this via GR_camera_throughput_limit_mbps
-    #   if the frame-rate cap alone doesn't stop the stalls — the safe value
-    #   depends on the host's USB3 controller, so it ships disabled.
-    camera_frame_rate_hz: float = 10.0
+    #   if a genuine bandwidth stall needs throttling — the safe value depends
+    #   on the host's USB3 controller, so it ships disabled.
+    camera_frame_rate_hz: float = 0.0
     camera_throughput_limit_mbps: float = 0.0
 
     def precise_params_for(self, motor: int) -> dict:
