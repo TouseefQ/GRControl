@@ -49,6 +49,12 @@ class IDSCamera:
         self._conv_mode = None       # cached Bayer→BGRa8 conversion mode
         self._wb_software = False     # software gray-world WB fallback active?
         self._pixel_format = None     # active PixelFormat symbolic name (raw depth)
+        # USB-stall auto-recovery: rate-limit restart attempts so a 15 fps preview
+        # loop can't hammer a wedged camera (see _recover).
+        self._last_recover_ts = 0.0
+        self._recover_cooldown_s = 3.0    # min gap between recovery attempts
+        self._recover_escalate_s = 10.0   # a re-stall within this → skip to reopen
+        self._last_recover_was_restart = False
 
     @staticmethod
     def _ensure_gentl_path():
@@ -434,6 +440,97 @@ class IDSCamera:
     async def close(self):
         await asyncio.get_event_loop().run_in_executor(_executor, self._close_camera)
 
+    # ── USB-stall auto-recovery ───────────────────────────────────────────────
+
+    @staticmethod
+    def _is_timeout_error(e) -> bool:
+        """True for the GC_ERR_TIMEOUT / PEAK_RETURN_CODE_TIMEOUT that the SDK
+        raises when the camera stops delivering frames (or ACKing control
+        writes) on a stalled USB link."""
+        s = str(e).upper()
+        return ("GC_ERR_TIMEOUT" in s or "PEAK_RETURN_CODE_TIMEOUT" in s
+                or "TIMED OUT" in s)
+
+    def _restart_acquisition(self):
+        """Cheap recovery: bounce the data stream without reopening the device.
+        Keeps TLParamsLocked/buffers as-is — just stops, flushes, re-queues the
+        announced buffers, and starts again. Any step may itself time out if the
+        USB link is fully wedged; the caller escalates to a full reopen then."""
+        ds = self._data_stream
+        nm = self._node_map
+        for node in ("AcquisitionStop",):
+            try:
+                nm.FindNode(node).Execute()
+                nm.FindNode(node).WaitUntilDone()
+            except Exception:
+                pass
+        try:
+            ds.StopAcquisition()
+        except Exception:
+            pass
+        try:
+            ds.Flush(self._ids_peak.DataStreamFlushMode_DiscardAll)
+        except Exception:
+            pass
+        try:
+            for buf in ds.AnnouncedBuffers():
+                try:
+                    ds.QueueBuffer(buf)
+                except Exception:
+                    pass  # already queued
+        except Exception:
+            pass
+        # These two MUST succeed for the stream to be live again — let them raise
+        # so _recover() escalates to a reopen on failure.
+        ds.StartAcquisition()
+        nm.FindNode("AcquisitionStart").Execute()
+        nm.FindNode("AcquisitionStart").WaitUntilDone()
+
+    def _reopen_device(self):
+        """Expensive recovery: fully close and re-open the camera. Works when
+        Windows still has the device enumerated; if the USB stack dropped it
+        entirely, _open_first_camera raises 'No IDS camera found' and a physical
+        replug is genuinely required."""
+        self._close_camera()
+        self._open_first_camera()
+
+    def _recover(self) -> bool:
+        """Bring the stream back after a USB timeout stall: try a stream restart
+        first, then a full device reopen. Rate-limited by _recover_cooldown_s so
+        the preview loop can't spin on a dead camera. If a restart didn't
+        actually revive the stream (we're back here within _recover_escalate_s),
+        skip straight to the reopen. Runs on the executor thread (same as every
+        other SDK call), so it can't race a grab."""
+        import time
+        now = time.monotonic()
+        if now - self._last_recover_ts < self._recover_cooldown_s:
+            return False
+        # A stall soon after a "successful" restart means the restart didn't
+        # really fix it — don't keep shallow-restarting, escalate to reopen.
+        restart_ineffective = (self._last_recover_was_restart
+                               and now - self._last_recover_ts < self._recover_escalate_s)
+        self._last_recover_ts = now
+
+        if not restart_ineffective:
+            log.warning("USB stall detected — restarting acquisition")
+            try:
+                self._restart_acquisition()
+                self._last_recover_was_restart = True
+                log.info("Acquisition restart succeeded")
+                return True
+            except Exception as e:
+                log.warning("Acquisition restart failed (%s) — reopening device", e)
+
+        try:
+            self._reopen_device()
+            self._last_recover_was_restart = False
+            log.info("Device reopen succeeded")
+            return True
+        except Exception as e:
+            self._last_recover_was_restart = False
+            log.error("Device reopen failed (%s) — physical USB replug required", e)
+            return False
+
     # ── Capture ───────────────────────────────────────────────────────────────
 
     def _capture_frame(self, output_path: str, image_format: str, metadata: dict) -> str:
@@ -445,9 +542,16 @@ class IDSCamera:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         # Discard incomplete (torn) buffers — rare, but possible if the preview
-        # consumer was briefly starving the queue. Retry up to 3 times.
+        # consumer was briefly starving the queue. Retry up to 3 times. A USB
+        # stall raises GC_ERR_TIMEOUT instead of returning a buffer; bounce the
+        # stream once and retry so a scan capture self-heals like the preview.
         for attempt in range(3):
-            raw_buffer = self._data_stream.WaitForFinishedBuffer(5000)
+            try:
+                raw_buffer = self._data_stream.WaitForFinishedBuffer(5000)
+            except Exception as e:
+                if self._is_timeout_error(e) and self._recover():
+                    continue
+                raise
             if not getattr(raw_buffer, "IsIncomplete", lambda: False)():
                 break
             log.warning("Capture: incomplete buffer (attempt %d), retrying", attempt + 1)
@@ -588,6 +692,11 @@ class IDSCamera:
             return buf.getvalue()
         except Exception as e:
             log.warning("Preview grab failed: %s", e)
+            # A USB stall (no frames on the link) leaves the stream dead until
+            # it's bounced. Self-heal so the operator doesn't have to replug the
+            # cable; rate-limited inside _recover so we don't spin at 15 fps.
+            if self._is_timeout_error(e):
+                self._recover()
             return None
 
     async def grab_preview_jpeg(self) -> Optional[bytes]:
