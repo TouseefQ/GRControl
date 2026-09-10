@@ -423,6 +423,9 @@ async def camera_settings(req: CameraSettingsRequest):
 class CameraCaptureRequest(BaseModel):
     output_folder: str = "./captures"
     image_format: str = "tiff"
+    # Physical camera-arc mounting slit (viewing elevation), degrees. Operator-set
+    # in the UI; recorded verbatim in the JSON sidecar. None → not provided.
+    camera_arc_angle_deg: Optional[float] = None
 
 
 @app.post("/api/camera/capture")
@@ -449,6 +452,7 @@ async def camera_capture(req: CameraCaptureRequest):
         "timestamp": datetime.now().isoformat(timespec="milliseconds"),
         "source": "manual_capture",
         "image_format": fmt,
+        "camera_arc_angle_deg": req.camera_arc_angle_deg,
         "enc_camera_deg": enc.camera_deg,
         "enc_led_arc_deg": enc.led_arc_deg,
         "enc_motor1_deg": enc.motor1_deg,

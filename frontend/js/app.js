@@ -487,10 +487,13 @@ document.getElementById("btn-preview-refresh").addEventListener("click", async (
 document.getElementById("btn-cam-save").addEventListener("click", async () => {
   const folder = document.getElementById("output-folder").value.trim() || "./captures";
   const fmt = document.getElementById("img-format").value;
+  // Same camera-arc slit angle the scan uses — a physical camera-mount property,
+  // so it belongs in every saved image's sidecar, manual captures included.
+  const arcAngle = parseFloat(document.getElementById("scan-camera-arc").value);
   const btn = document.getElementById("btn-cam-save");
   btn.disabled = true;
   try {
-    const res = await api.cameraCapture(folder, fmt);  // gallery updates via image_captured
+    const res = await api.cameraCapture(folder, fmt, Number.isNaN(arcAngle) ? null : arcAngle);  // gallery updates via image_captured
     logOk(`Image saved: ${res.path}`);
   } catch (e) {
     logErr(`Save image failed: ${e.message}`);
@@ -502,6 +505,9 @@ document.getElementById("btn-cam-save").addEventListener("click", async () => {
 // ── Scan config helpers ───────────────────────────────────────────────────────
 
 // Scan LED pattern checkboxes
+// Fixed mounting angle of each LED on the arc (LED 1→0° … LED 7→60°, 10° apart).
+// Mirrors LED_ARC_ANGLES_DEG in backend/models.py.
+const LED_ARC_ANGLES_DEG = Array.from({ length: 7 }, (_, i) => i * 10);
 const scanLedPattern = document.getElementById("scan-led-pattern");
 for (let i = 0; i < 7; i++) {
   const label = document.createElement("label");
@@ -517,6 +523,11 @@ for (let i = 0; i < 7; i++) {
   cb.addEventListener("change", updateScanEstimate);
   label.appendChild(cb);
   label.appendChild(document.createTextNode(`L${i + 1}`));
+  const ang = document.createElement("span");
+  ang.textContent = `${LED_ARC_ANGLES_DEG[i]}°`;
+  ang.style.color = "var(--text-dim)";
+  ang.style.fontSize = "10px";
+  label.appendChild(ang);
   scanLedPattern.appendChild(label);
 }
 
@@ -644,6 +655,7 @@ document.getElementById("btn-scan-start").addEventListener("click", async () => 
     },
     image_format:       document.getElementById("img-format").value,
     output_folder:      document.getElementById("output-folder").value.trim() || "./captures",
+    camera_arc_angle_deg: parseFloat(document.getElementById("scan-camera-arc").value),
     move_simultaneously: document.getElementById("scan-simultaneous").checked,
     settle_s:           parseFloat(document.getElementById("scan-settle").value) || 5.0,
     precise_positioning: document.getElementById("scan-precise").checked,

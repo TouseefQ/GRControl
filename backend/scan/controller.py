@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Awaitable, Optional
 
-from ..models import ScanConfig, ScanProgress, EncoderState
+from ..models import ScanConfig, ScanProgress, EncoderState, LED_ARC_ANGLES_DEG
 from ..esp32.protocol import (
     cmd_move, cmd_stop, cmd_led_set, cmd_led_off_all
 )
@@ -297,7 +297,14 @@ class ScanController:
             "timestamp": datetime.now().isoformat(),
             "led_target_deg": led_pos,
             "camera_target_deg": cam_pos,
+            # Physical camera-arc mounting slit (viewing elevation) for this run;
+            # operator-set, constant across the scan (see ScanConfig).
+            "camera_arc_angle_deg": getattr(self._config, "camera_arc_angle_deg", None),
             "led_index": led_idx,
+            # Fixed mounting angle of this LED on the arc (LED 1→0° … LED 7→60°),
+            # distinct from led_target_deg (the arc's rotational position).
+            "led_angle_deg": (LED_ARC_ANGLES_DEG[led_idx]
+                              if 0 <= led_idx < len(LED_ARC_ANGLES_DEG) else None),
             "led_brightness": brightness,
             "encoder_motor1_deg": self.current_encoder.motor1_deg,
             "encoder_motor2_deg": self.current_encoder.motor2_deg,

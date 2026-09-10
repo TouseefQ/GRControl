@@ -64,6 +64,12 @@ class ScanAxis(BaseModel):
         return result
 
 
+# Fixed mounting angle of each of the 7 LEDs on the arc: LED 1 (index 0) sits at
+# 0°, spaced 10° apart, up to LED 7 (index 6) at 60°. Physical geometry — recorded
+# per-image and shown in the UI. The frontend mirrors this list in app.js.
+LED_ARC_ANGLES_DEG = [round(i * 10.0, 4) for i in range(7)]
+
+
 class LedPattern(BaseModel):
     # Default: only L1 enabled, all at full brightness (matches the UI defaults).
     enabled: list[bool] = Field(default_factory=lambda: [i == 0 for i in range(7)])
@@ -76,6 +82,12 @@ class ScanConfig(BaseModel):
     led_pattern: LedPattern = LedPattern()
     image_format: str = "tiff"  # tiff | png | bmp | jpeg
     output_folder: str = "."
+    # Camera-arc mounting slit (viewing elevation), degrees. A physical,
+    # operator-set value: the camera is bolted into one of the arc's angled
+    # slits (20–55° in 5° steps), so it is constant for the whole run — not
+    # motor-driven and not read from an encoder. Recorded verbatim in every
+    # image's JSON sidecar.
+    camera_arc_angle_deg: float = 20.0
     move_simultaneously: bool = True
     # Seconds to hold each LED lit and let the arm settle before the camera
     # captures. Was effectively 50 ms (too fast to expose); default 5 s.

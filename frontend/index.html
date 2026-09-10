@@ -260,6 +260,20 @@
       <!-- Options -->
       <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;align-items:center;">
         <label class="inline-label">
+          Camera arc angle (°):
+          <select id="scan-camera-arc" style="margin-left:6px;"
+                  title="Physical slit the camera is mounted in on the arc (viewing elevation). Constant for the run; recorded in every image's JSON sidecar (scan and manual captures).">
+            <option value="20" selected>20</option>
+            <option value="25">25</option>
+            <option value="30">30</option>
+            <option value="35">35</option>
+            <option value="40">40</option>
+            <option value="45">45</option>
+            <option value="50">50</option>
+            <option value="55">55</option>
+          </select>
+        </label>
+        <label class="inline-label">
           <input type="checkbox" id="scan-simultaneous" checked />
           Move both motors simultaneously
         </label>

@@ -130,11 +130,11 @@ export async function cameraSettings(exposure_us, gain, reverse_x = null, revers
   return r.json();
 }
 
-export async function cameraCapture(output_folder, image_format) {
+export async function cameraCapture(output_folder, image_format, camera_arc_angle_deg = null) {
   const r = await fetch(`${BASE}/api/camera/capture`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ output_folder, image_format }),
+    body: JSON.stringify({ output_folder, image_format, camera_arc_angle_deg }),
   });
   if (!r.ok) throw new Error((await r.json()).detail);
   return r.json();
