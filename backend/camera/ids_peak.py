@@ -34,7 +34,9 @@ class IDSCamera:
     even when the SDK is not installed (useful during development).
     """
 
-    def __init__(self):
+    def __init__(self, settings=None):
+        from ..models import Settings
+        self._settings = settings or Settings()
         self._device = None
         self._data_stream = None
         self._node_map = None
@@ -300,6 +302,54 @@ class IDSCamera:
         log.warning("Hardware auto white balance unavailable — using software gray-world WB")
         self._wb_software = True
 
+    def _limit_usb_bandwidth(self):
+        """Throttle the camera's USB3 output to avoid GC_ERR_TIMEOUT stalls.
+
+        Applies an absolute DeviceLinkThroughputLimit (if configured) and/or an
+        AcquisitionFrameRate cap. Every node touch is guarded independently: a
+        camera that lacks a node, or rejects a value, logs and moves on — this
+        must never break the (working) open path.
+        """
+        nm = self._node_map
+
+        def _clamp(node, value):
+            try:
+                value = max(node.Minimum(), min(node.Maximum(), value))
+            except Exception:
+                pass
+            return value
+
+        # DeviceLinkThroughputLimit — hard ceiling on bytes/s over the link.
+        limit_mbps = getattr(self._settings, "camera_throughput_limit_mbps", 0.0)
+        if limit_mbps and limit_mbps > 0:
+            try:
+                try:
+                    nm.FindNode("DeviceLinkThroughputLimitMode").SetCurrentEntry("On")
+                except Exception:
+                    pass  # some models have no mode node; the limit alone applies
+                node = nm.FindNode("DeviceLinkThroughputLimit")
+                target = _clamp(node, int(limit_mbps * 1_000_000))
+                node.SetValue(target)
+                log.info("DeviceLinkThroughputLimit set to %d B/s (~%.1f MB/s)",
+                         target, target / 1_000_000)
+            except Exception as e:
+                log.warning("DeviceLinkThroughputLimit not applied: %s", e)
+
+        # AcquisitionFrameRate — fewer frames/s = less sustained bandwidth.
+        fps = getattr(self._settings, "camera_frame_rate_hz", 0.0)
+        if fps and fps > 0:
+            try:
+                try:
+                    nm.FindNode("AcquisitionFrameRateEnable").SetValue(True)
+                except Exception:
+                    pass  # node absent on some models; frame rate is always live
+                node = nm.FindNode("AcquisitionFrameRate")
+                target = _clamp(node, float(fps))
+                node.SetValue(target)
+                log.info("AcquisitionFrameRate capped to %.2f fps", target)
+            except Exception as e:
+                log.warning("AcquisitionFrameRate not applied: %s", e)
+
     def _open_first_camera(self):
         peak = self._ids_peak
         peak.Library.Initialize()
@@ -327,6 +377,11 @@ class IDSCamera:
         # Switch to an unpacked 12-bit Bayer format for full-depth raw TIFFs.
         # Must precede PayloadSize (buffer size depends on the pixel format).
         self._setup_raw_bayer_12()
+
+        # Cap USB bandwidth to guard against GC_ERR_TIMEOUT mid-stream stalls.
+        # Must follow the pixel-format change (throughput scales with depth) and
+        # precede TLParamsLocked (these nodes lock during acquisition).
+        self._limit_usb_bandwidth()
 
         payload_size = self._node_map.FindNode("PayloadSize").Value()
         # 12-bit packed frames are ~2× the bytes of 8-bit. Allocate at least 16

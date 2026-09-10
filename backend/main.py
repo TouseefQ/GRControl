@@ -56,7 +56,7 @@ app = FastAPI(title="GRControlSoftware")
 
 # ── Singletons ────────────────────────────────────────────────────────────────
 esp32 = ESP32Connection(settings)
-camera = IDSCamera()
+camera = IDSCamera(settings)
 scan_ctrl = ScanController(esp32, camera, settings)
 device_state = DeviceState()
 _ws_clients: set[WebSocket] = set()

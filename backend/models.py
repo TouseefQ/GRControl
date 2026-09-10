@@ -154,6 +154,23 @@ class Settings(BaseSettings):
     # calibrated half-angle here or via GR_camera_keepout_deg to turn it on.
     camera_keepout_deg: float = 0.0
 
+    # ── Camera USB bandwidth cap ─────────────────────────────────────────────
+    # Defensive throttle against GC_ERR_TIMEOUT USB-link stalls (camera stops
+    # responding mid-stream on the USB3 bus; only a physical replug recovers it).
+    # Both caps are applied on camera open, each guarded so a missing/immutable
+    # node can't break the working open path.
+    #
+    # camera_frame_rate_hz: caps AcquisitionFrameRate (0 = leave at camera max).
+    #   The live preview is already ~15 fps, so a modest cap costs nothing and
+    #   halves the bytes/s the USB link must sustain. Clamped to the camera's
+    #   own [min, max] range.
+    # camera_throughput_limit_mbps: hard DeviceLinkThroughputLimit in MB/s
+    #   (0 = leave at camera max). Set this via GR_camera_throughput_limit_mbps
+    #   if the frame-rate cap alone doesn't stop the stalls — the safe value
+    #   depends on the host's USB3 controller, so it ships disabled.
+    camera_frame_rate_hz: float = 10.0
+    camera_throughput_limit_mbps: float = 0.0
+
     def precise_params_for(self, motor: int) -> dict:
         """Per-motor tolerance + min-step floor. motor 1 = camera, 2 = LED arc."""
         if motor == 1:
