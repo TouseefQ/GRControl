@@ -11,7 +11,14 @@ from typing import Optional
 import json
 
 log = logging.getLogger(__name__)
-_executor = ThreadPoolExecutor(max_workers=2)
+# IMPORTANT: single worker. Every IDS peak SDK call — Library.Initialize(), open,
+# get_info, set_exposure/gain, preview grab, capture, close — must run on the SAME
+# thread. The library's initialization is bound to the thread that called
+# Initialize(); a call dispatched to any other worker fails with
+# PEAK_RETURN_CODE_NOT_INITIALIZED (black preview). A single worker also serializes
+# access to the (non-thread-safe) node map and data stream, so a settings change
+# can't race the live-preview grab. Do not raise max_workers.
+_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ids-cam")
 
 
 def _run_sync(fn, *args):
