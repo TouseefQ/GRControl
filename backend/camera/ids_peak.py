@@ -476,17 +476,28 @@ class IDSCamera:
             from PIL import Image as PILImage
             ipl = self._ids_ipl
 
-            # Drain any stale frames: slow conversion lets buffers pile up,
-            # then they all drain in a burst → flicker.  Always grab the
-            # freshest frame available before starting the expensive decode.
-            raw_buffer = self._data_stream.WaitForFinishedBuffer(2000)
-            while True:
-                try:
-                    stale = self._data_stream.WaitForFinishedBuffer(5)
-                    self._data_stream.QueueBuffer(raw_buffer)
-                    raw_buffer = stale
-                except Exception:
-                    break  # queue empty — raw_buffer is the newest frame
+            # Grab the freshest COMPLETE frame. Slow conversion lets buffers pile
+            # up, then drain in a burst → flicker, so always drain to the newest
+            # first. And skip INCOMPLETE (torn) buffers: decoding a half-filled
+            # packed-Bayer buffer produces the coloured horizontal streaks seen
+            # when the USB link is starving. Same guard as _capture_frame.
+            raw_buffer = None
+            for _ in range(3):
+                buf = self._data_stream.WaitForFinishedBuffer(2000)
+                while True:
+                    try:
+                        stale = self._data_stream.WaitForFinishedBuffer(5)
+                        self._data_stream.QueueBuffer(buf)
+                        buf = stale
+                    except Exception:
+                        break  # queue empty — buf is the newest frame
+                if getattr(buf, "IsIncomplete", lambda: False)():
+                    self._data_stream.QueueBuffer(buf)
+                    continue  # torn frame — try again for a complete one
+                raw_buffer = buf
+                break
+            if raw_buffer is None:
+                return None  # only torn frames available — skip this grab
 
             # ConversionMode_Fast doesn't handle the IDS packed Bayer format
             # correctly on this camera — produces a black frame. Use the same
