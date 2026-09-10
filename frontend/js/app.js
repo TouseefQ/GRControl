@@ -575,11 +575,15 @@ function updateScanEstimate() {
   ).filter(Boolean).length;
 
   const keepout = parseFloat(document.getElementById("scan-keepout").value) || 0;
+  // Reverse camera arc: the effective (recorded) camera angle is 360−p, so the
+  // occlusion geometry and the skipped-list must use it too. Mirrors the backend.
+  const camReverse = document.getElementById("scan-cam-reverse")?.checked;
+  const camView = c => camReverse ? (360 - c) : c;
   const blockedPairs = [];
   if (keepout > 0) {
     for (const l of ledPos) {
       for (const c of camPos) {
-        if (Math.abs(normalizeDeg(c - l)) < keepout) blockedPairs.push([l, c]);
+        if (Math.abs(normalizeDeg(camView(c) - l)) < keepout) blockedPairs.push([l, c]);
       }
     }
   }
@@ -599,7 +603,7 @@ function updateScanEstimate() {
   if (blocked > 0) {
     const fmtDeg = v => (Math.round(v * 1e4) / 1e4).toString();
     listEl.innerHTML = blockedPairs
-      .map(([l, c]) => `LED ${fmtDeg(l)}° / CAM ${fmtDeg(c)}°`)
+      .map(([l, c]) => `LED ${fmtDeg(l)}° / CAM ${fmtDeg(camView(c))}°`)
       .join("<br>");
     box.style.display = "";
   } else {
@@ -612,6 +616,7 @@ function updateScanEstimate() {
  "scan-cam-start","scan-cam-stop","scan-cam-step","scan-keepout"].forEach(id => {
   document.getElementById(id)?.addEventListener("input", updateScanEstimate);
 });
+document.getElementById("scan-cam-reverse")?.addEventListener("change", updateScanEstimate);
 
 updateScanEstimate();
 
@@ -657,6 +662,7 @@ document.getElementById("btn-scan-start").addEventListener("click", async () => 
     output_folder:      document.getElementById("output-folder").value.trim() || "./captures",
     camera_arc_angle_deg: parseFloat(document.getElementById("scan-camera-arc").value),
     move_simultaneously: document.getElementById("scan-simultaneous").checked,
+    camera_reverse:      document.getElementById("scan-cam-reverse").checked,
     settle_s:           parseFloat(document.getElementById("scan-settle").value) || 5.0,
     precise_positioning: document.getElementById("scan-precise").checked,
     camera_keepout_deg: parseFloat(document.getElementById("scan-keepout").value) || 0,

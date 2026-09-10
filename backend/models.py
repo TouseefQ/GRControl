@@ -88,6 +88,12 @@ class ScanConfig(BaseModel):
     # motor-driven and not read from an encoder. Recorded verbatim in every
     # image's JSON sidecar.
     camera_arc_angle_deg: float = 20.0
+    # Reverse (anti-clockwise) camera-arc sweep. The camera arm can only travel
+    # 0–180° clockwise from home, so viewing angles in 180–360° are reached by
+    # rotating anti-clockwise instead. When True, each configured camera position
+    # p (entered as 0–180) is COMMANDED to the motor as −p (drives CCW) and
+    # RECORDED as its mirror 360−p (0→360, 10→350, …, 180→180).
+    camera_reverse: bool = False
     move_simultaneously: bool = True
     # Seconds to hold each LED lit and let the arm settle before the camera
     # captures. Was effectively 50 ms (too fast to expose); default 5 s.

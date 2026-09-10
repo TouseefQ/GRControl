@@ -542,7 +542,10 @@ async def scan_start(config: ScanConfig):
     resp = {"status": "started"}
     if blocked:
         keepout = scan_ctrl.keepout_deg(config)
-        sample = ", ".join(f"LED {l:g}°/CAM {c:g}°" for l, c in blocked[:5])
+        sample = ", ".join(
+            f"LED {l:g}°/CAM {(360.0 - c) if config.camera_reverse else c:g}°"
+            for l, c in blocked[:5]
+        )
         more = "" if len(blocked) <= 5 else f" (+{len(blocked) - 5} more)"
         resp["skipped"] = len(blocked)
         resp["skipped_message"] = (
