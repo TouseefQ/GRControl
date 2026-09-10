@@ -183,6 +183,16 @@ class Settings(BaseSettings):
     # Empty string = keep whatever the camera powers up with.
     camera_pixel_format: str = "BayerRG10g40IDS"
 
+    # Format to switch to for the moment of a raw-TIFF capture, then switch back.
+    # The live preview streams the lighter camera_pixel_format (10-bit) for a
+    # smooth, reliable feed; Save/scan capture briefly retunes to this heavier
+    # format to write a full-depth raw TIFF. Continuous 12-bit streaming delivers
+    # incomplete buffers on this host, but a one-shot 12-bit grab (preview paused)
+    # completes fine — the same frames IDS Cockpit captures. Empty string, or a
+    # value equal to camera_pixel_format, disables the switch (capture at the
+    # stream format).
+    camera_capture_pixel_format: str = "BayerRG12g24IDS"
+
     def precise_params_for(self, motor: int) -> dict:
         """Per-motor tolerance + min-step floor. motor 1 = camera, 2 = LED arc."""
         if motor == 1:

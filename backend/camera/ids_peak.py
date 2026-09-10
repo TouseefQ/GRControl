@@ -49,6 +49,7 @@ class IDSCamera:
         self._conv_mode = None       # cached Bayer→BGRa8 conversion mode
         self._wb_software = False     # software gray-world WB fallback active?
         self._pixel_format = None     # active PixelFormat symbolic name (raw depth)
+        self._num_buffers = 16        # buffer count announced at open (see _open_first_camera)
         # USB-stall auto-recovery: rate-limit restart attempts so a 15 fps preview
         # loop can't hammer a wedged camera (see _recover).
         self._last_recover_ts = 0.0
@@ -187,6 +188,41 @@ class IDSCamera:
         except Exception as e:
             log.warning("Set PixelFormat=%s failed: %s — keeping default", choice, e)
             self._pixel_format = self._current_pixel_format()
+
+    def _switch_pixel_format(self, target: str):
+        """Retune the running stream to a different PixelFormat and restart it.
+        PayloadSize changes with the format, so the announced buffers are
+        revoked and re-allocated at the new size. Used to grab a single heavier
+        (12-bit) frame for a raw TIFF while the live preview streams the lighter
+        (10-bit) format — continuous 12-bit stalls this host, but a one-shot
+        grab with the preview paused completes fine. Raises on failure so the
+        caller can restore the stream format."""
+        nm = self._node_map
+        ds = self._data_stream
+        try:
+            nm.FindNode("AcquisitionStop").Execute()
+            nm.FindNode("AcquisitionStop").WaitUntilDone()
+        except Exception:
+            pass
+        ds.StopAcquisition()
+        nm.FindNode("TLParamsLocked").SetValue(0)
+        try:
+            ds.Flush(self._ids_peak.DataStreamFlushMode_DiscardAll)
+        except Exception:
+            pass
+        for buf in ds.AnnouncedBuffers():
+            ds.RevokeBuffer(buf)
+        nm.FindNode("PixelFormat").SetCurrentEntry(target)
+        self._pixel_format = target
+        payload_size = nm.FindNode("PayloadSize").Value()
+        for _ in range(self._num_buffers):
+            buf = ds.AllocAndAnnounceBuffer(payload_size)
+            ds.QueueBuffer(buf)
+        nm.FindNode("TLParamsLocked").SetValue(1)
+        ds.StartAcquisition()
+        nm.FindNode("AcquisitionStart").Execute()
+        nm.FindNode("AcquisitionStart").WaitUntilDone()
+        log.info("PixelFormat retuned to %s", target)
 
     def _resolve_conv_mode(self):
         """Bayer→BGRa8 conversion mode, resolved once and cached. HighQuality
@@ -408,6 +444,7 @@ class IDSCamera:
         # the queue and forces the camera to overwrite an in-use buffer — which
         # is what produces the torn/half-dark frames.
         num_buffers = max(self._data_stream.NumBuffersAnnouncedMinRequired(), 16)
+        self._num_buffers = num_buffers
         for _ in range(num_buffers):
             buf = self._data_stream.AllocAndAnnounceBuffer(payload_size)
             self._data_stream.QueueBuffer(buf)
@@ -551,6 +588,36 @@ class IDSCamera:
         if fmt not in ("tiff", "png", "bmp", "jpeg", "jpg"):
             fmt = "tiff"
 
+        # A raw TIFF is written at the (heavier) capture format for full depth,
+        # while the live preview streams the lighter camera_pixel_format. Retune
+        # to the capture format for this one grab, then restore the stream format
+        # so the preview stays smooth and reliable. Only raw TIFF needs it.
+        stream_fmt = self._pixel_format
+        capture_fmt = getattr(self._settings, "camera_capture_pixel_format", "") or ""
+        switched = False
+        if fmt == "tiff" and capture_fmt and capture_fmt != stream_fmt:
+            try:
+                self._switch_pixel_format(capture_fmt)
+                switched = True
+            except Exception as e:
+                log.warning("Capture format switch to %s failed (%s) — capturing at %s",
+                            capture_fmt, e, stream_fmt)
+                if self._pixel_format != stream_fmt:  # half-switched — restore
+                    try:
+                        self._switch_pixel_format(stream_fmt)
+                    except Exception:
+                        pass
+        try:
+            return self._capture_at_current_format(fmt, output_path, metadata)
+        finally:
+            if switched:
+                try:
+                    self._switch_pixel_format(stream_fmt)
+                except Exception as e:
+                    log.error("Failed to restore stream format %s after capture: %s",
+                              stream_fmt, e)
+
+    def _capture_at_current_format(self, fmt: str, output_path: str, metadata: dict) -> str:
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
