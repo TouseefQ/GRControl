@@ -248,15 +248,18 @@ class ScanController:
         self._last_residual[1] = None
         self._last_residual[2] = None
 
-        move1 = self._esp.send_raw(cmd_move(1, led_pos, cfg.led_axis.speed_pct))
-        move2 = self._esp.send_raw(cmd_move(2, cam_pos, cfg.camera_axis.speed_pct))
+        # Motor 1 = camera arm, Motor 2 = LED arc (see models.Motor). Command each
+        # motor to its own axis' target at that axis' speed.
+        move_cam = self._esp.send_raw(cmd_move(1, cam_pos, cfg.camera_axis.speed_pct))
+        move_led = self._esp.send_raw(cmd_move(2, led_pos, cfg.led_axis.speed_pct))
 
         if cfg.move_simultaneously:
-            await asyncio.gather(move1, move2)
+            await asyncio.gather(move_cam, move_led)
         else:
-            await move1
-            await asyncio.wait_for(self._move_done_motor1.wait(), timeout=30)
-            await move2
+            # LED arc first, then camera.
+            await move_led
+            await asyncio.wait_for(self._move_done_motor2.wait(), timeout=30)
+            await move_cam
 
         # Wait for both motion-complete signals (or timeout after 30 s each)
         await asyncio.gather(
@@ -265,24 +268,24 @@ class ScanController:
         )
 
         # Closed-loop refinement: nudge each motor until its output encoder reads
-        # the target within tolerance. Motor 1 was commanded to led_pos, motor 2
-        # to cam_pos (preserving the coarse move's motor→target mapping); seed the
-        # loop with the settled angle each motor just reported via MOVE_DONE.
+        # the target within tolerance. Motor 1 (camera) was commanded to cam_pos,
+        # motor 2 (LED arc) to led_pos; seed the loop with the settled angle each
+        # motor just reported via MOVE_DONE.
         if cfg.precise_positioning and self._settings.precise_enabled:
-            r1, r2 = await asyncio.gather(
-                motion.refine(self._esp, 1, led_pos, self._last_final[1],
+            r_cam, r_led = await asyncio.gather(
+                motion.refine(self._esp, 1, cam_pos, self._last_final[1],
                               **self._settings.precise_params_for(1)),
-                motion.refine(self._esp, 2, cam_pos, self._last_final[2],
+                motion.refine(self._esp, 2, led_pos, self._last_final[2],
                               **self._settings.precise_params_for(2)),
             )
-            self._last_residual[1] = r1.get("residual")
-            self._last_residual[2] = r2.get("residual")
-            if not r1.get("encoder_ok"):
-                log.warning("Precise positioning: motor 1 encoder unavailable at "
-                            "LED=%.3f° — open-loop fallback", led_pos)
-            if not r2.get("encoder_ok"):
-                log.warning("Precise positioning: motor 2 encoder unavailable at "
-                            "CAM=%.3f° — open-loop fallback", cam_pos)
+            self._last_residual[1] = r_cam.get("residual")
+            self._last_residual[2] = r_led.get("residual")
+            if not r_cam.get("encoder_ok"):
+                log.warning("Precise positioning: motor 1 (camera) encoder unavailable "
+                            "at CAM=%.3f° — open-loop fallback", cam_pos)
+            if not r_led.get("encoder_ok"):
+                log.warning("Precise positioning: motor 2 (LED arc) encoder unavailable "
+                            "at LED=%.3f° — open-loop fallback", led_pos)
 
     def _make_filename(self, folder: str, led_pos: float, cam_pos: float,
                        led_idx: int, fmt: str) -> str:
@@ -314,8 +317,9 @@ class ScanController:
             "encoder_camera_error_deg": self.current_encoder.camera_error_deg,
             # Closed-loop residual = encoder − target after refinement (None if
             # precise positioning was off or the encoder was unavailable).
-            "led_residual_deg": self._last_residual[1],
-            "camera_residual_deg": self._last_residual[2],
+            # Motor 1 = camera, motor 2 = LED arc.
+            "led_residual_deg": self._last_residual[2],
+            "camera_residual_deg": self._last_residual[1],
         }
 
     async def _emit_progress(self):
