@@ -143,14 +143,16 @@ class IDSCamera:
         except Exception:
             return None
 
-    def _setup_raw_bayer_12(self):
-        """Switch the sensor to an *unpacked* 12-bit Bayer format so TIFF
-        captures preserve the full sensor depth (0–4095) as a single-channel
-        16-bit mosaic. Enumerate what the camera offers, log it, and prefer an
-        unpacked ``BayerRG12`` (16-bit container — trivial to write as a 16-bit
-        TIFF and to debayer offline); fall back to any 12-bit Bayer, else leave
-        the default. MUST run before PayloadSize is read (the buffer size and
-        stream bandwidth both depend on the pixel format)."""
+    def _setup_pixel_format(self):
+        """Select the raw Bayer streaming format. Prefers the configured
+        ``camera_pixel_format`` (default BayerRG10g40IDS — the 10-bit format IDS
+        Cockpit streams and the one that completes reliably on this USB3 host);
+        the 12-bit BayerRG12g24IDS is available for hosts that can sustain the
+        larger transfers but stalls with incomplete buffers on marginal links.
+        Falls back to any offered 12-bit, then any Bayer, then the camera
+        default. Whatever is chosen is repacked to an unpacked 16-bit container
+        on save (see _raw_bayer_uint16). MUST run before PayloadSize is read
+        (buffer size and stream bandwidth both depend on the pixel format)."""
         nm = self._node_map
         try:
             node = nm.FindNode("PixelFormat")
@@ -161,21 +163,27 @@ class IDSCamera:
             return
 
         log.info("PixelFormat entries: %s", entries)
+        preferred = getattr(self._settings, "camera_pixel_format", "") or ""
         bayer12 = [s for s in entries if s.startswith("Bayer") and "12" in s]
-        # Unpacked names end in the bare bit count ("BayerRG12"); packed variants
-        # carry a suffix ("BayerRG12p", "BayerRG12g24IDS") and are skipped here.
-        unpacked = [s for s in bayer12 if s.endswith("12")]
-        choice = (unpacked or bayer12 or [None])[0]
+        if preferred and preferred in entries:
+            choice = preferred
+        elif preferred:
+            log.warning("Configured PixelFormat %s not offered (have %s) — falling back",
+                        preferred, entries)
+            choice = (bayer12 or [None])[0]
+        else:
+            choice = (bayer12 or [None])[0]
         if not choice:
-            log.warning("No 12-bit Bayer format offered — keeping default (%s)",
+            log.warning("No usable Bayer format offered — keeping default (%s)",
                         self._current_pixel_format())
             self._pixel_format = self._current_pixel_format()
             return
         try:
             node.SetCurrentEntry(choice)
             self._pixel_format = choice
-            log.info("PixelFormat = %s (raw 12-bit%s)", choice,
-                     "" if choice.endswith("12") else ", packed — will repack on save")
+            packed = "g" in choice or choice.endswith("p")
+            log.info("PixelFormat = %s (raw%s)", choice,
+                     ", packed — will repack on save" if packed else "")
         except Exception as e:
             log.warning("Set PixelFormat=%s failed: %s — keeping default", choice, e)
             self._pixel_format = self._current_pixel_format()
@@ -190,23 +198,28 @@ class IDSCamera:
         return self._conv_mode
 
     def _raw_bayer_uint16(self, image):
-        """From an IPL image on the current (packed 12-bit) Bayer format, return
-        the raw mosaic as a 2-D uint16 NumPy array (values 0–4095). Repacks a
-        packed format to its unpacked 16-bit variant first — lossless, no
-        debayering. Copies out of buffer memory so the caller can requeue.
-        No white balance and no flips: flipping a Bayer mosaic shifts its CFA
-        phase, desyncing it from the recorded pixel_format — reorient offline."""
+        """From an IPL image on the current (packed) Bayer format, return the
+        raw mosaic as a 2-D uint16 NumPy array. Repacks a packed format
+        (e.g. BayerRG10g40IDS, BayerRG12g24IDS) to its unpacked 16-bit variant
+        (BayerRG10 / BayerRG12) first — lossless, no debayering. Copies out of
+        buffer memory so the caller can requeue. No white balance and no flips:
+        flipping a Bayer mosaic shifts its CFA phase, desyncing it from the
+        recorded pixel_format — reorient offline."""
+        import re
         import numpy as np
         ipl = self._ids_ipl
         fmt = self._pixel_format or ""
-        if fmt.startswith("Bayer") and "12" in fmt and not fmt.endswith("12"):
-            phase = fmt[5:7]
-            target = getattr(ipl, f"PixelFormatName_Bayer{phase}12", None)
+        # Packed Bayer names are "Bayer<phase><bits><suffix>" (suffix = g40IDS,
+        # g24IDS, p, …); the unpacked container is "Bayer<phase><bits>".
+        m = re.match(r"(Bayer[RGB]{2})(\d+)", fmt)
+        if m and not fmt.endswith(m.group(2)):
+            target = getattr(ipl, f"PixelFormatName_{m.group(1)}{m.group(2)}", None)
             if target is not None:
                 try:
                     image = image.ConvertTo(target, ipl.ConversionMode_Fast)
                 except Exception as e:
-                    log.warning("Repack packed→unpacked Bayer12 failed: %s", e)
+                    log.warning("Repack packed→unpacked %s%s failed: %s",
+                                m.group(1), m.group(2), e)
         arr = np.array(self._ipl_to_numpy(image))  # copy out before requeue
         # get_numpy_3D hands back a 16-bit single-channel image as (H, W, 2)
         # little-endian bytes, so reinterpret each byte-pair as one uint16.
@@ -382,7 +395,7 @@ class IDSCamera:
 
         # Switch to an unpacked 12-bit Bayer format for full-depth raw TIFFs.
         # Must precede PayloadSize (buffer size depends on the pixel format).
-        self._setup_raw_bayer_12()
+        self._setup_pixel_format()
 
         # Cap USB bandwidth to guard against GC_ERR_TIMEOUT mid-stream stalls.
         # Must follow the pixel-format change (throughput scales with depth) and
@@ -578,7 +591,11 @@ class IDSCamera:
             PILImage.fromarray(view_arr).save(str(png_path), format="PNG")
             metadata.setdefault("pixel_format", self._pixel_format)
             metadata.setdefault("raw_bayer", True)
-            metadata.setdefault("bit_depth", 12)
+            # Real ADC depth of the streamed format (10 or 12), parsed from its
+            # name; the 16-bit TIFF container holds these values left-unshifted.
+            import re as _re
+            _m = _re.match(r"Bayer[RGB]{2}(\d+)", self._pixel_format or "")
+            metadata.setdefault("bit_depth", int(_m.group(1)) if _m else None)
             metadata.setdefault("white_balance",
                                 "none (raw mosaic); companion .png is WB'd 8-bit")
             metadata.setdefault("preview_png", png_path.name)

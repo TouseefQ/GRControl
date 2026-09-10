@@ -172,6 +172,17 @@ class Settings(BaseSettings):
     camera_frame_rate_hz: float = 0.0
     camera_throughput_limit_mbps: float = 0.0
 
+    # ── Camera pixel format ──────────────────────────────────────────────────
+    # Which raw Bayer format to stream. The U3-34L0XCP offers BayerRG10g40IDS
+    # (10-bit) and BayerRG12g24IDS (12-bit), both packed. 12-bit gives the
+    # fullest depth for quantitative raw TIFFs, BUT on some USB3 hosts its
+    # heavier per-frame payload comes back as incomplete/truncated buffers that
+    # stall the link (IDS peak Cockpit streams 10-bit by default for the same
+    # reason). Default to the reliable 10-bit; set GR_camera_pixel_format=
+    # BayerRG12g24IDS only on a host that completes the larger transfers.
+    # Empty string = keep whatever the camera powers up with.
+    camera_pixel_format: str = "BayerRG10g40IDS"
+
     def precise_params_for(self, motor: int) -> dict:
         """Per-motor tolerance + min-step floor. motor 1 = camera, 2 = LED arc."""
         if motor == 1:
