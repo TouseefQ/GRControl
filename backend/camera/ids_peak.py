@@ -597,15 +597,23 @@ class IDSCamera:
 
     # ── Capture ───────────────────────────────────────────────────────────────
 
-    def _ensure_streaming(self, fmt: str):
-        """Best-effort: get the data stream running at `fmt` from whatever state
-        a (possibly failed) switch left it in. Never raises — a genuinely dead
-        control channel can't be revived here, but that's logged, not thrown, so
-        a capture never leaves the app spinning."""
+    def _restore_stream(self, fmt: str):
+        """Return to a live stream at `fmt` after a capture. Try the in-place
+        switch first; if that fails, fall back to a full device reopen (which
+        comes up on the default stream format). Never raises. If even the reopen
+        fails, the link is genuinely gone — mark the camera closed so the preview
+        loop stops cleanly instead of hammering a dead device (which is what
+        cascaded into the replug-required wedge)."""
         try:
             self._switch_pixel_format(fmt)
+            return
         except Exception as e:
-            log.error("Could not restore stream to %s: %s", fmt, e)
+            log.warning("In-place restore to %s failed (%s) — reopening device", fmt, e)
+        try:
+            self._reopen_device()
+        except Exception as e:
+            self._open = False
+            log.error("Reopen after capture failed (%s) — camera closed; USB replug required", e)
 
     def _capture_frame(self, output_path: str, image_format: str, metadata: dict) -> str:
         fmt = image_format.lower()
@@ -616,49 +624,55 @@ class IDSCamera:
         # while the live preview streams the lighter camera_pixel_format. Retune
         # to the capture format for this one grab, then restore the stream format.
         # Continuous 12-bit stalls this host, but a one-shot grab (preview paused
-        # by the caller) completes fine — the frames Cockpit also captures.
+        # by the caller) completes — the frames Cockpit also captures.
         stream_fmt = self._pixel_format
         capture_fmt = getattr(self._settings, "camera_capture_pixel_format", "") or ""
         if not (fmt == "tiff" and capture_fmt and capture_fmt != stream_fmt):
             return self._capture_at_current_format(fmt, output_path, metadata)
 
         # Switched capture. _recover() is gated off for the duration (see
-        # _in_format_switch) so a switch hiccup can't cascade into a reopen/wedge;
-        # on ANY failure we restore the stream format and fall back to capturing
-        # there, so a Save always produces a file and the preview always survives.
+        # _in_format_switch) so a switch/grab hiccup can't cascade into a wedge;
+        # _restore_stream always brings us back to a live stream (or cleanly
+        # closes), and on any failure we fall back to a capture at stream_fmt.
         self._in_format_switch = True
-        restored = False
         try:
             try:
                 self._switch_pixel_format(capture_fmt)
             except Exception as e:
-                log.warning("Capture switch to %s failed (%s) — capturing at %s instead",
+                log.warning("Capture switch to %s failed (%s) — capturing at %s",
                             capture_fmt, e, stream_fmt)
-                self._ensure_streaming(stream_fmt)
-                restored = True
-                return self._capture_at_current_format(fmt, output_path, metadata)
+                self._restore_stream(stream_fmt)
+                return self._fallback_capture(fmt, output_path, metadata)
             try:
-                return self._capture_at_current_format(fmt, output_path, metadata)
+                result = self._capture_at_current_format(fmt, output_path, metadata)
             except Exception as e:
                 log.warning("Capture at %s failed after switch (%s) — falling back to %s",
                             capture_fmt, e, stream_fmt)
-                self._ensure_streaming(stream_fmt)
-                restored = True
-                return self._capture_at_current_format(fmt, output_path, metadata)
+                self._restore_stream(stream_fmt)
+                return self._fallback_capture(fmt, output_path, metadata)
+            self._restore_stream(stream_fmt)
+            return result
         finally:
-            if not restored:
-                self._ensure_streaming(stream_fmt)
             self._in_format_switch = False
+
+    def _fallback_capture(self, fmt: str, output_path: str, metadata: dict) -> str:
+        """Capture at the (restored) stream format after a 12-bit attempt failed.
+        If the link was lost during restore, fail clearly rather than grabbing
+        from a dead stream."""
+        if not self._open:
+            raise RuntimeError("Camera link lost during capture — physical USB replug required")
+        return self._capture_at_current_format(fmt, output_path, metadata)
 
     def _capture_at_current_format(self, fmt: str, output_path: str, metadata: dict) -> str:
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Discard incomplete (torn) buffers — rare, but possible if the preview
-        # consumer was briefly starving the queue. Retry up to 3 times. A USB
-        # stall raises GC_ERR_TIMEOUT instead of returning a buffer; bounce the
-        # stream once and retry so a scan capture self-heals like the preview.
-        for attempt in range(3):
+        # Discard incomplete (torn) buffers and retry. Continuous 12-bit
+        # intermittently drops data on this host, so give it many attempts —
+        # incomplete buffers return immediately (no wait), so this stays fast;
+        # only a genuine stall hits the 5 s timeout. A stall raises
+        # GC_ERR_TIMEOUT; self-heal once (gated off during a format switch).
+        for attempt in range(12):
             try:
                 raw_buffer = self._data_stream.WaitForFinishedBuffer(5000)
             except Exception as e:
@@ -667,10 +681,10 @@ class IDSCamera:
                 raise
             if not getattr(raw_buffer, "IsIncomplete", lambda: False)():
                 break
-            log.warning("Capture: incomplete buffer (attempt %d), retrying", attempt + 1)
+            log.warning("Capture: incomplete buffer (attempt %d/12), retrying", attempt + 1)
             self._data_stream.QueueBuffer(raw_buffer)
         else:
-            raise RuntimeError("Could not obtain a complete frame after 3 attempts")
+            raise RuntimeError("Could not obtain a complete frame after 12 attempts")
 
         if fmt == "tiff":
             # Full-depth raw Bayer mosaic — single-channel 16-bit, no debayer /
