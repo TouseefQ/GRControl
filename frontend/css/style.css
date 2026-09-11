@@ -280,24 +280,22 @@ body {
   box-shadow: 0 0 12px #fbbf2466;
 }
 
-.led-brightness {
-  width: 72px;
-  -webkit-appearance: none;
-  appearance: none;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--border);
+input[type=number].led-brightness {
+  width: 60px;
+  text-align: center;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 4px 6px;
+  font-size: 13px;
+  font-family: inherit;
   outline: none;
-  cursor: pointer;
   margin: 6px 0;
 }
 
-.led-brightness::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 12px; height: 12px;
-  border-radius: 50%;
-  background: var(--accent);
-  cursor: pointer;
+input[type=number].led-brightness:focus {
+  border-color: var(--accent);
 }
 
 /* ── Form elements ──────────────────────────────────────────────────────── */

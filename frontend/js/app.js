@@ -339,12 +339,15 @@ for (let i = 0; i < 7; i++) {
   });
 
   const slider = document.createElement("input");
-  slider.type = "range";
+  slider.type = "number";
   slider.className = "led-brightness";
   slider.min = 0; slider.max = 255; slider.value = 255;
-  slider.title = `LED ${i + 1} brightness`;
+  slider.title = `LED ${i + 1} PWM (0–255)`;
   slider.addEventListener("input", () => {
-    ledBrightness[i] = parseInt(slider.value);
+    let v = parseInt(slider.value);
+    if (isNaN(v)) return;
+    v = Math.max(0, Math.min(255, v));
+    ledBrightness[i] = v;
     if (ledStates[i]) api.ledSet(i, 1, ledBrightness[i]);
   });
 
@@ -528,6 +531,20 @@ for (let i = 0; i < 7; i++) {
   ang.style.color = "var(--text-dim)";
   ang.style.fontSize = "10px";
   label.appendChild(ang);
+  // Per-LED PWM (0–255) used for this scan. Defaults to full; set lower to
+  // avoid running the scan at 100% brightness.
+  const pwm = document.createElement("input");
+  pwm.type = "number";
+  pwm.className = "led-brightness";
+  pwm.id = `scan-led-bright-${i}`;
+  pwm.min = 0; pwm.max = 255; pwm.value = 255;
+  pwm.title = `LED ${i + 1} scan PWM (0–255)`;
+  pwm.addEventListener("input", () => {
+    let v = parseInt(pwm.value);
+    if (isNaN(v)) return;
+    pwm.value = Math.max(0, Math.min(255, v));
+  });
+  label.appendChild(pwm);
   scanLedPattern.appendChild(label);
 }
 
@@ -645,7 +662,10 @@ document.getElementById("btn-scan-start").addEventListener("click", async () => 
   const enabledLeds  = Array.from({ length: 7 }, (_, i) =>
     document.getElementById(`scan-led-${i}`)?.checked ?? true
   );
-  const ledBrights   = Array.from({ length: 7 }, () => 255);
+  const ledBrights   = Array.from({ length: 7 }, (_, i) => {
+    const v = parseInt(document.getElementById(`scan-led-bright-${i}`)?.value);
+    return isNaN(v) ? 255 : Math.max(0, Math.min(255, v));
+  });
 
   const config = {
     led_axis: {
