@@ -146,24 +146,12 @@ class IDSCamera:
             return None
 
     def _set_stream_buffer_mode(self):
-        """Ask the data stream to always hand back the NEWEST finished buffer and
-        recycle the older ones itself. This matches how IDS Cockpit consumes
-        frames; our previous manual drain (grab, requeue, grab-again in a tight
-        loop) could hand back a buffer the camera was still filling — delivered
-        as IsIncomplete() — which is exactly what broke 12-bit here even at 2 fps.
-        Guarded: not every GenTL producer exposes the node."""
-        try:
-            sm = self._data_stream.NodeMaps()[0]
-            node = sm.FindNode("StreamBufferHandlingMode")
-            entries = [e.SymbolicValue() for e in node.Entries() if e.IsAvailable()]
-            for pref in ("NewestOnly", "NewestFirst"):
-                if pref in entries:
-                    node.SetCurrentEntry(pref)
-                    log.info("StreamBufferHandlingMode = %s", pref)
-                    return
-            log.info("StreamBufferHandlingMode: no newest-first entry in %s — default", entries)
-        except Exception as e:
-            log.info("StreamBufferHandlingMode not set (%s) — using default", e)
+        """DEPRECATED / unused. Setting StreamBufferHandlingMode=NewestOnly
+        destabilized the stream on the test host — a live exposure/gain write
+        would then stall even the 10-bit feed. Left here (uncalled) as a record;
+        the default buffer handling + manual drain in _grab_preview_jpeg is what
+        streams reliably. Do not re-enable without testing on the rig."""
+        return
 
     def _setup_pixel_format(self):
         """Select the raw Bayer streaming format. Prefers the configured
@@ -438,7 +426,6 @@ class IDSCamera:
         )
         self._node_map = self._device.RemoteDevice().NodeMaps()[0]
         self._data_stream = self._device.DataStreams()[0].OpenDataStream()
-        self._set_stream_buffer_mode()
 
         # Free-running acquisition (no external/software trigger).
         try:
@@ -765,11 +752,11 @@ class IDSCamera:
             from PIL import Image as PILImage
             ipl = self._ids_ipl
 
-            # With StreamBufferHandlingMode=NewestOnly the data stream hands back
-            # the freshest finished buffer and recycles the rest, so no manual
-            # drain is needed. Skip an INCOMPLETE (torn) buffer and retry — a
-            # half-filled packed-Bayer buffer decodes to coloured streaks. On a
-            # USB stall WaitForFinishedBuffer raises a timeout; self-heal once.
+            # Grab the freshest COMPLETE frame. Default buffer handling hands
+            # back the OLDEST finished buffer, so drain to the newest queued one
+            # first (a slow JPEG encode otherwise shows a stale burst → flicker).
+            # Skip INCOMPLETE (torn) buffers. On a USB stall WaitForFinishedBuffer
+            # raises a timeout; self-heal once and skip this grab.
             raw_buffer = None
             for _ in range(3):
                 try:
@@ -778,6 +765,13 @@ class IDSCamera:
                     if self._is_timeout_error(e):
                         self._recover()
                     return None
+                while True:
+                    try:
+                        stale = self._data_stream.WaitForFinishedBuffer(5)
+                        self._data_stream.QueueBuffer(buf)
+                        buf = stale
+                    except Exception:
+                        break  # queue empty — buf is the newest frame
                 if getattr(buf, "IsIncomplete", lambda: False)():
                     self._data_stream.QueueBuffer(buf)
                     continue  # torn frame — try again for a complete one
