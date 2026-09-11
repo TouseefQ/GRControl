@@ -458,7 +458,14 @@ async def camera_capture(req: CameraCaptureRequest):
         "enc_motor1_deg": enc.motor1_deg,
         "enc_motor2_deg": enc.motor2_deg,
     }
-    saved = await camera.capture(path, fmt, metadata)
+    # Pause the live MJPEG loop while we grab: a raw-TIFF capture briefly retunes
+    # the camera to 12-bit and back, and the preview must not grab from the
+    # stream mid-switch. The loop resumes as soon as the flag clears.
+    _camera_busy.set()
+    try:
+        saved = await camera.capture(path, fmt, metadata)
+    finally:
+        _camera_busy.clear()
     if not saved:
         raise HTTPException(500, "Capture failed")
 
@@ -480,6 +487,9 @@ async def camera_preview():
 
 
 _preview_stream_lock = asyncio.Lock()
+# Set while a manual capture is retuning the camera to 12-bit and back, so the
+# live MJPEG loop pauses instead of grabbing from a mid-switch stream.
+_camera_busy = asyncio.Event()
 
 
 @app.get("/api/camera/stream")
@@ -497,8 +507,8 @@ async def camera_stream():
         loop = asyncio.get_event_loop()
         async with _preview_stream_lock:
             while camera.is_open:
-                if scan_ctrl._progress.running:
-                    await asyncio.sleep(0.2)  # yield the camera to the scan
+                if scan_ctrl._progress.running or _camera_busy.is_set():
+                    await asyncio.sleep(0.2)  # yield the camera to scan / capture retune
                     continue
                 t0 = loop.time()
                 jpeg = await camera.grab_preview_jpeg()

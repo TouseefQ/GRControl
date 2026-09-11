@@ -50,6 +50,7 @@ class IDSCamera:
         self._wb_software = False     # software gray-world WB fallback active?
         self._pixel_format = None     # active PixelFormat symbolic name (raw depth)
         self._num_buffers = 16        # buffer count announced at open (see _open_first_camera)
+        self._in_format_switch = False  # True while retuning format for a capture (gates _recover)
         # USB-stall auto-recovery: rate-limit restart attempts so a 15 fps preview
         # loop can't hammer a wedged camera (see _recover).
         self._last_recover_ts = 0.0
@@ -574,6 +575,11 @@ class IDSCamera:
         other SDK call), so it can't race a grab."""
         import time
         now = time.monotonic()
+        # Never run heavy recovery (stop/start, reopen) while we're deliberately
+        # retuning the pixel format for a capture — a transient timeout there is
+        # expected and recovery would fight the switch and can wedge the link.
+        if self._in_format_switch:
+            return False
         if now - self._last_recover_ts < self._recover_cooldown_s:
             return False
         # A stall soon after a "successful" restart means the restart didn't
@@ -604,6 +610,16 @@ class IDSCamera:
 
     # ── Capture ───────────────────────────────────────────────────────────────
 
+    def _ensure_streaming(self, fmt: str):
+        """Best-effort: get the data stream running at `fmt` from whatever state
+        a (possibly failed) switch left it in. Never raises — a genuinely dead
+        control channel can't be revived here, but that's logged, not thrown, so
+        a capture never leaves the app spinning."""
+        try:
+            self._switch_pixel_format(fmt)
+        except Exception as e:
+            log.error("Could not restore stream to %s: %s", fmt, e)
+
     def _capture_frame(self, output_path: str, image_format: str, metadata: dict) -> str:
         fmt = image_format.lower()
         if fmt not in ("tiff", "png", "bmp", "jpeg", "jpg"):
@@ -611,32 +627,41 @@ class IDSCamera:
 
         # A raw TIFF is written at the (heavier) capture format for full depth,
         # while the live preview streams the lighter camera_pixel_format. Retune
-        # to the capture format for this one grab, then restore the stream format
-        # so the preview stays smooth and reliable. Only raw TIFF needs it.
+        # to the capture format for this one grab, then restore the stream format.
+        # Continuous 12-bit stalls this host, but a one-shot grab (preview paused
+        # by the caller) completes fine — the frames Cockpit also captures.
         stream_fmt = self._pixel_format
         capture_fmt = getattr(self._settings, "camera_capture_pixel_format", "") or ""
-        switched = False
-        if fmt == "tiff" and capture_fmt and capture_fmt != stream_fmt:
+        if not (fmt == "tiff" and capture_fmt and capture_fmt != stream_fmt):
+            return self._capture_at_current_format(fmt, output_path, metadata)
+
+        # Switched capture. _recover() is gated off for the duration (see
+        # _in_format_switch) so a switch hiccup can't cascade into a reopen/wedge;
+        # on ANY failure we restore the stream format and fall back to capturing
+        # there, so a Save always produces a file and the preview always survives.
+        self._in_format_switch = True
+        restored = False
+        try:
             try:
                 self._switch_pixel_format(capture_fmt)
-                switched = True
             except Exception as e:
-                log.warning("Capture format switch to %s failed (%s) — capturing at %s",
+                log.warning("Capture switch to %s failed (%s) — capturing at %s instead",
                             capture_fmt, e, stream_fmt)
-                if self._pixel_format != stream_fmt:  # half-switched — restore
-                    try:
-                        self._switch_pixel_format(stream_fmt)
-                    except Exception:
-                        pass
-        try:
-            return self._capture_at_current_format(fmt, output_path, metadata)
+                self._ensure_streaming(stream_fmt)
+                restored = True
+                return self._capture_at_current_format(fmt, output_path, metadata)
+            try:
+                return self._capture_at_current_format(fmt, output_path, metadata)
+            except Exception as e:
+                log.warning("Capture at %s failed after switch (%s) — falling back to %s",
+                            capture_fmt, e, stream_fmt)
+                self._ensure_streaming(stream_fmt)
+                restored = True
+                return self._capture_at_current_format(fmt, output_path, metadata)
         finally:
-            if switched:
-                try:
-                    self._switch_pixel_format(stream_fmt)
-                except Exception as e:
-                    log.error("Failed to restore stream format %s after capture: %s",
-                              stream_fmt, e)
+            if not restored:
+                self._ensure_streaming(stream_fmt)
+            self._in_format_switch = False
 
     def _capture_at_current_format(self, fmt: str, output_path: str, metadata: dict) -> str:
         path = Path(output_path)
