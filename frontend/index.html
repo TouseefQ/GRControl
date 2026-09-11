@@ -260,9 +260,9 @@
       <!-- Options -->
       <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;align-items:center;">
         <label class="inline-label">
-          Camera arc angle (°):
+          Camera mounting slit (°):
           <select id="scan-camera-arc" style="margin-left:6px;"
-                  title="Physical slit the camera is mounted in on the arc (viewing elevation). Constant for the run; recorded in every image's JSON sidecar (scan and manual captures).">
+                  title="Physical slit the camera is bolted into on the arc (viewing elevation, 20–55°). Constant for the run; recorded in every image's JSON sidecar (scan and manual captures). Not a motor target.">
             <option value="20" selected>20</option>
             <option value="25">25</option>
             <option value="30">30</option>
@@ -331,10 +331,12 @@
 
       <div class="scan-axis-grid">
         <div>
-          <div class="field"><label>Camera arc angle (°)</label>
-            <input type="number" id="nscan-cam-angle" value="0" min="-360" max="360" step="0.1" /></div>
+          <div class="field"><label>Camera arc angle (° — motor target)</label>
+            <input type="number" id="nscan-cam-angle" value="0" min="-360" max="360" step="0.1"
+                   title="Absolute OME85 target for the camera arm. The LED offset below is added to THIS value." /></div>
           <div class="field mt-8"><label>LED arc angle relative to camera (°)</label>
-            <input type="number" id="nscan-led-rel" value="45" min="-360" max="360" step="0.1" /></div>
+            <input type="number" id="nscan-led-rel" value="45" min="-360" max="360" step="0.1"
+                   title="LED-arc target = camera arc angle + this. e.g. camera 45° + 90° → LED arc driven to 135° (AS5600#3 reads ~135°)." /></div>
         </div>
         <div>
           <div class="field"><label>Photos per LED</label>
@@ -355,9 +357,9 @@
       <!-- Options -->
       <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;align-items:center;">
         <label class="inline-label">
-          Camera arc angle (°):
+          Camera mounting slit (°):
           <select id="nscan-camera-arc" style="margin-left:6px;"
-                  title="Physical slit the camera is mounted in on the arc (viewing elevation). Constant for the run; recorded in every image's JSON sidecar.">
+                  title="Physical slit the camera is bolted into on the arc (viewing elevation, 20–55°). Constant for the run and recorded in every image's JSON sidecar — NOT the motor target and NOT what the LED offset is relative to.">
             <option value="20" selected>20</option>
             <option value="25">25</option>
             <option value="30">30</option>
