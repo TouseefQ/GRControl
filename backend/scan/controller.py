@@ -32,6 +32,15 @@ ProgressCallback = Callable[[ScanProgress], Awaitable[None]]
 ImageCallback = Callable[[str, bytes], Awaitable[None]]  # (path, jpeg_preview)
 
 
+def _abs360(a: Optional[float]) -> Optional[float]:
+    """Absolute angle in [0, 360). A signed/negative angle maps to its positive
+    equivalent (−10 → 350, −180 → 180, −90 → 270); positives are unchanged. Used
+    for RECORDED angles (sidecar + filename + progress) so they report the
+    absolute viewing angle regardless of which way the axis was swept. The motor
+    is still COMMANDED the signed value, so it sweeps the intended direction."""
+    return None if a is None else round(a % 360.0, 4)
+
+
 class ScanController:
     def __init__(self, esp32_conn, camera, settings):
         self._esp = esp32_conn
@@ -243,8 +252,8 @@ class ScanController:
                             )
 
                         self._progress.current_position += 1
-                        self._progress.current_led_pos_deg = led_pos
-                        self._progress.current_cam_pos_deg = cam_pos
+                        self._progress.current_led_pos_deg = _abs360(led_pos)
+                        self._progress.current_cam_pos_deg = _abs360(cam_pos)
                         self._progress.current_led_index = led_idx
                         await self._emit_progress()
 
@@ -309,7 +318,8 @@ class ScanController:
     def _make_filename(self, folder: str, led_pos: float, cam_pos: float,
                        led_idx: int, fmt: str) -> str:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        name = (f"LED_{led_pos:07.3f}deg_CAM_{cam_pos:07.3f}deg"
+        # Absolute [0,360) angles in the name so a −10 sweep reads CAM_350.000.
+        name = (f"LED_{_abs360(led_pos):07.3f}deg_CAM_{_abs360(cam_pos):07.3f}deg"
                 f"_LED{led_idx:02d}_{timestamp}.{fmt}")
         return os.path.join(folder, name)
 
@@ -317,8 +327,9 @@ class ScanController:
                        led_idx: int, brightness: int) -> dict:
         return {
             "timestamp": datetime.now().isoformat(),
-            "led_target_deg": led_pos,
-            "camera_target_deg": cam_pos,
+            # Recorded angles are absolute [0,360): a −10 sweep is recorded as 350.
+            "led_target_deg": _abs360(led_pos),
+            "camera_target_deg": _abs360(cam_pos),
             # Physical camera-arc mounting slit (viewing elevation) for this run;
             # operator-set, constant across the scan (see ScanConfig).
             "camera_arc_angle_deg": getattr(self._config, "camera_arc_angle_deg", None),
@@ -328,10 +339,13 @@ class ScanController:
             "led_angle_deg": (LED_ARC_ANGLES_DEG[led_idx]
                               if 0 <= led_idx < len(LED_ARC_ANGLES_DEG) else None),
             "led_brightness": brightness,
-            "encoder_motor1_deg": self.current_encoder.motor1_deg,
-            "encoder_motor2_deg": self.current_encoder.motor2_deg,
-            "encoder_led_arc_deg": self.current_encoder.led_arc_deg,
-            "encoder_camera_deg": self.current_encoder.camera_deg,
+            # Measured absolute positions, [0,360).
+            "encoder_motor1_deg": _abs360(self.current_encoder.motor1_deg),
+            "encoder_motor2_deg": _abs360(self.current_encoder.motor2_deg),
+            "encoder_led_arc_deg": _abs360(self.current_encoder.led_arc_deg),
+            "encoder_camera_deg": _abs360(self.current_encoder.camera_deg),
+            # Errors/residuals are signed deltas (target − encoder), left in
+            # (−180,180] — not absolute angles.
             "encoder_led_error_deg": self.current_encoder.led_error_deg,
             "encoder_camera_error_deg": self.current_encoder.camera_error_deg,
             # Closed-loop residual = encoder − target after refinement (None if

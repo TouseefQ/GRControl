@@ -608,8 +608,9 @@ function updateScanEstimate() {
   document.getElementById("scan-skipped-count").textContent = blocked.toLocaleString();
   if (blocked > 0) {
     const fmtDeg = v => (Math.round(v * 1e4) / 1e4).toString();
+    const abs360 = v => fmtDeg(((v % 360) + 360) % 360);  // record/show absolute angle
     listEl.innerHTML = blockedPairs
-      .map(([l, c]) => `LED ${fmtDeg(l)}° / CAM ${fmtDeg(c)}°`)
+      .map(([l, c]) => `LED ${abs360(l)}° / CAM ${abs360(c)}°`)
       .join("<br>");
     box.style.display = "";
   } else {

@@ -574,7 +574,7 @@ async def scan_start(config: ScanConfig):
     if blocked:
         keepout = scan_ctrl.keepout_deg(config)
         sample = ", ".join(
-            f"LED {l:g}°/CAM {c:g}°"
+            f"LED {l % 360:g}°/CAM {c % 360:g}°"
             for l, c in blocked[:5]
         )
         more = "" if len(blocked) <= 5 else f" (+{len(blocked) - 5} more)"
