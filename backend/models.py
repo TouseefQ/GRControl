@@ -154,45 +154,41 @@ class Settings(BaseSettings):
     # calibrated half-angle here or via GR_camera_keepout_deg to turn it on.
     camera_keepout_deg: float = 0.0
 
-    # ── Camera USB bandwidth cap ─────────────────────────────────────────────
-    # Defensive throttle against GC_ERR_TIMEOUT USB-link stalls (camera stops
-    # responding mid-stream on the USB3 bus; only a physical replug recovers it).
-    # Both caps are applied on camera open, each guarded so a missing/immutable
-    # node can't break the working open path.
+    # ── Camera USB bandwidth pacing ──────────────────────────────────────────
+    # THE fix for the GC_ERR_TIMEOUT / incomplete-buffer stalls on this rig
+    # (resolved 2026-09-11). Continuous 12-bit at full rate hit the host's USB3
+    # controller with bursts it couldn't complete → torn buffers, stalls, and a
+    # dead control channel needing a physical replug. Capping DeviceLinkThroughput‐
+    # Limit paces the byte rate (like IDS peak Cockpit does) so 12-bit streams
+    # cleanly. Applied on open, each guarded so a missing node can't break open.
     #
-    # camera_frame_rate_hz: caps AcquisitionFrameRate (0 = leave at camera max,
-    #   the default — on the U3-34L0XCP the max is only ~8.35 fps at 12-bit
-    #   full-frame, so there is nothing to cap and enabling it just flips the
-    #   camera into timed acquisition for no gain; left off unless a faster
-    #   camera/host genuinely needs throttling).
-    # camera_throughput_limit_mbps: hard DeviceLinkThroughputLimit in MB/s
-    #   (0 = leave at camera max). Set this via GR_camera_throughput_limit_mbps
-    #   if a genuine bandwidth stall needs throttling — the safe value depends
-    #   on the host's USB3 controller, so it ships disabled.
+    # camera_throughput_limit_mbps: DeviceLinkThroughputLimit in MB/s. 100 is the
+    #   confirmed-stable value on the rig (U3-34L0XCP + this laptop's xHCI). Lower
+    #   it (60/40) if a different host still stalls; 0 = no limit (camera max).
+    # camera_frame_rate_hz: caps AcquisitionFrameRate (0 = camera max). Not needed
+    #   once throughput is paced; the max is only ~8.35 fps at 12-bit anyway.
     camera_frame_rate_hz: float = 0.0
-    camera_throughput_limit_mbps: float = 0.0
+    camera_throughput_limit_mbps: float = 100.0
 
     # ── Camera pixel format ──────────────────────────────────────────────────
-    # Which raw Bayer format to stream. The U3-34L0XCP offers BayerRG10g40IDS
-    # (10-bit) and BayerRG12g24IDS (12-bit), both packed. 12-bit gives the
-    # fullest depth for quantitative raw TIFFs, BUT on some USB3 hosts its
-    # heavier per-frame payload comes back as incomplete/truncated buffers that
-    # stall the link (IDS peak Cockpit streams 10-bit by default for the same
-    # reason). Default to the reliable 10-bit; set GR_camera_pixel_format=
-    # BayerRG12g24IDS only on a host that completes the larger transfers.
-    # Empty string = keep whatever the camera powers up with.
-    camera_pixel_format: str = "BayerRG10g40IDS"
+    # Stream ONE format for the whole session — no runtime format switching,
+    # which proved unreliable on this host (a switch's control writes fail and
+    # wedge the link). Stream 12-bit everywhere so both preview and Save use it:
+    # with the throughput pacing above, continuous 12-bit is stable, and because
+    # preview and capture share the format nothing ever switches. Raw TIFF saves
+    # are therefore full-depth 12-bit. The U3-34L0XCP offers BayerRG10g40IDS
+    # (10-bit) and BayerRG12g24IDS (12-bit). Empty = keep the camera's power-on
+    # format. Drop to 10-bit only if a host can't sustain paced 12-bit.
+    camera_pixel_format: str = "BayerRG12g24IDS"
 
-    # Format to switch to for the moment of a raw-TIFF capture, then restore the
-    # stream format. The live preview streams the lighter camera_pixel_format
-    # (10-bit, rock-solid on this host); Save/scan capture briefly retunes to
-    # this heavier format for a single full-depth 12-bit grab. Continuous 12-bit
-    # stalls and can wedge this host, but a one-shot grab with the preview paused
-    # completes fine (the frames Cockpit captures). The switch is bulletproofed:
-    # recovery is gated off during it, and any failure restores the stream format
-    # and captures there, so it can never wedge the link. Set to "" (or equal to
-    # camera_pixel_format) to disable and capture at the stream format.
-    camera_capture_pixel_format: str = "BayerRG12g24IDS"
+    # Optional capture-time format switch (10-bit preview / 12-bit save). DISABLED
+    # ("") because we stream 12-bit for everything — no switch needed, and runtime
+    # switching wedges this host. Left as a knob: set to a heavier format ONLY on
+    # a host where the live stream must be lighter than the saved TIFF AND runtime
+    # switching is reliable there. When set, the switch is bulletproofed (recovery
+    # gated off during it; any failure restores the stream format and captures
+    # there) so it can't wedge — but prefer single-format streaming.
+    camera_capture_pixel_format: str = ""
 
     def precise_params_for(self, motor: int) -> dict:
         """Per-motor tolerance + min-step floor. motor 1 = camera, 2 = LED arc."""
