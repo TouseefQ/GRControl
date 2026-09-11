@@ -91,19 +91,6 @@ class ScanController:
         ko = config.camera_keepout_deg
         return self._settings.camera_keepout_deg if ko is None else ko
 
-    @staticmethod
-    def _cam_cmd_deg(cam_pos: float, reverse: bool) -> float:
-        """Angle to COMMAND the camera motor for a configured position. Reverse
-        drives it anti-clockwise via a negative absolute angle (the firmware's
-        MOVE is a linear absolute target, so −p sweeps CCW)."""
-        return round(-cam_pos, 4) if reverse else cam_pos
-
-    @staticmethod
-    def _cam_view_deg(cam_pos: float, reverse: bool) -> float:
-        """Camera viewing angle to RECORD/display for a configured position.
-        Reverse maps 0..180 → 360..180 (p → 360−p); forward is unchanged."""
-        return round(360.0 - cam_pos, 4) if reverse else cam_pos
-
     def occluded_positions(self, config: ScanConfig) -> list[tuple[float, float]]:
         """Every (led_pos, cam_pos) grid pair where the LED arc sits in front of
         the lens, so it must be skipped.
@@ -114,19 +101,18 @@ class ScanController:
         Measured on the rig: the arc blocks while it leads the camera by 0–50°, and
         is clear beyond that. So a pair is occluded within that one-sided window:
 
-            0 < normalize(led − cam_view) <= camera_keepout_deg
+            0 < normalize(led − cam) <= camera_keepout_deg
 
         camera_keepout_deg is the max lead angle that still blocks (default 50).
         The arc level with or behind the camera (lead <= 0) is always clear, and so
         is the arc led past the window (lead > keepout). keepout <= 0 disables the
-        guard entirely. Uses the recorded camera angle (cam_view) so reverse sweeps
-        stay correct; the returned cam_pos is the raw configured value."""
+        guard entirely. Angles are the configured values directly (a negative
+        camera angle simply sweeps the other way)."""
         keepout = self.keepout_deg(config)
         bad = []
         for led_pos in config.led_axis.positions:
             for cam_pos in config.camera_axis.positions:
-                cam_view = self._cam_view_deg(cam_pos, config.camera_reverse)
-                lead = motion.normalize_deg(led_pos - cam_view)
+                lead = motion.normalize_deg(led_pos - cam_pos)
                 if 0.0 < lead <= keepout:
                     bad.append((led_pos, cam_pos))
         return bad
@@ -201,19 +187,14 @@ class ScanController:
                     if (led_pos, cam_pos) in occluded:
                         continue  # LED arc leads the camera here — skip
 
-                    # Reverse (anti-clockwise) camera arc: command the camera
-                    # motor to the negative angle so it sweeps CCW, but record and
-                    # display the equivalent 360−p viewing angle. Forward mode:
-                    # both are just cam_pos.
-                    cam_cmd = self._cam_cmd_deg(cam_pos, cfg.camera_reverse)
-                    cam_view = self._cam_view_deg(cam_pos, cfg.camera_reverse)
-
                     # Pause check
                     while self._progress.paused:
                         await asyncio.sleep(0.1)
 
-                    # Move motors (camera to the commanded angle, LED to led_pos)
-                    await self._move_to(led_pos, cam_cmd, cfg)
+                    # Move motors (camera to cam_pos, LED to led_pos). Both are the
+                    # configured angles directly — a negative camera angle simply
+                    # sweeps the arm the other way (firmware MOVE is absolute).
+                    await self._move_to(led_pos, cam_pos, cfg)
 
                     # Per-LED capture
                     for led_idx in active_leds:
@@ -240,9 +221,9 @@ class ScanController:
 
                         # Capture
                         filename = self._make_filename(
-                            cfg.output_folder, led_pos, cam_view, led_idx, cfg.image_format
+                            cfg.output_folder, led_pos, cam_pos, led_idx, cfg.image_format
                         )
-                        metadata = self._make_metadata(led_pos, cam_view, led_idx, brightness)
+                        metadata = self._make_metadata(led_pos, cam_pos, led_idx, brightness)
                         saved_path = await self._camera.capture(
                             filename, cfg.image_format, metadata
                         )
@@ -258,12 +239,12 @@ class ScanController:
                                     await self._image_cb(saved_path, preview)
                         else:
                             self._progress.errors.append(
-                                f"Capture failed at LED={led_pos}° CAM={cam_view}° LED#{led_idx}"
+                                f"Capture failed at LED={led_pos}° CAM={cam_pos}° LED#{led_idx}"
                             )
 
                         self._progress.current_position += 1
                         self._progress.current_led_pos_deg = led_pos
-                        self._progress.current_cam_pos_deg = cam_view
+                        self._progress.current_cam_pos_deg = cam_pos
                         self._progress.current_led_index = led_idx
                         await self._emit_progress()
 
@@ -341,9 +322,6 @@ class ScanController:
             # Physical camera-arc mounting slit (viewing elevation) for this run;
             # operator-set, constant across the scan (see ScanConfig).
             "camera_arc_angle_deg": getattr(self._config, "camera_arc_angle_deg", None),
-            # True if this camera position was reached by an anti-clockwise sweep
-            # (camera_target_deg is then the recorded 360−p viewing angle).
-            "camera_reverse": bool(getattr(self._config, "camera_reverse", False)),
             "led_index": led_idx,
             # Fixed mounting angle of this LED on the arc (LED 1→0° … LED 7→60°),
             # distinct from led_target_deg (the arc's rotational position).

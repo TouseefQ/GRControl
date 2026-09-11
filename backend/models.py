@@ -56,12 +56,16 @@ class ScanAxis(BaseModel):
 
     @property
     def positions(self) -> list[float]:
-        result = []
-        angle = self.start_deg
-        while angle <= self.stop_deg + 1e-9:
-            result.append(round(angle, 4))
-            angle += self.step_deg
-        return result
+        """Inclusive positions from start_deg to stop_deg in step_deg increments.
+        Direction follows start→stop: if stop < start the sweep descends (e.g.
+        0 → −180), so entering a negative range moves the axis the opposite way.
+        step_deg is treated as a magnitude."""
+        step = abs(self.step_deg)
+        if step < 1e-9:
+            return [round(self.start_deg, 4)]
+        sign = 1.0 if self.stop_deg >= self.start_deg else -1.0
+        n = int(abs(self.stop_deg - self.start_deg) / step + 1e-9)
+        return [round(self.start_deg + sign * step * i, 4) for i in range(n + 1)]
 
 
 # Fixed mounting angle of each of the 7 LEDs on the arc: LED 1 (index 0) sits at
@@ -88,12 +92,6 @@ class ScanConfig(BaseModel):
     # motor-driven and not read from an encoder. Recorded verbatim in every
     # image's JSON sidecar.
     camera_arc_angle_deg: float = 20.0
-    # Reverse (anti-clockwise) camera-arc sweep. The camera arm can only travel
-    # 0–180° clockwise from home, so viewing angles in 180–360° are reached by
-    # rotating anti-clockwise instead. When True, each configured camera position
-    # p (entered as 0–180) is COMMANDED to the motor as −p (drives CCW) and
-    # RECORDED as its mirror 360−p (0→360, 10→350, …, 180→180).
-    camera_reverse: bool = False
     move_simultaneously: bool = True
     # Seconds to hold each LED lit and let the arm settle before the camera
     # captures. Was effectively 50 ms (too fast to expose); default 5 s.
@@ -148,7 +146,7 @@ class Settings(BaseSettings):
     # view and blocks it, then swings clear once it has led far enough. Measured on
     # the rig: it blocks while leading by 0–50°. A position is occluded when:
     #
-    #     0 < normalize(led − cam_view) <= camera_keepout_deg
+    #     0 < normalize(led − cam) <= camera_keepout_deg
     #
     # camera_keepout_deg is the max lead angle that still blocks (default 50°). The
     # scan SKIPS occluded positions. Arc level-with/behind the camera (lead <= 0)

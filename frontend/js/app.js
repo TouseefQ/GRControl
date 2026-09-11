@@ -575,18 +575,15 @@ function updateScanEstimate() {
   ).filter(Boolean).length;
 
   const keepout = parseFloat(document.getElementById("scan-keepout").value) || 0;
-  // Reverse camera arc: the effective (recorded) camera angle is 360−p, so the
-  // occlusion geometry and the skipped-list must use it too. Mirrors the backend.
-  const camReverse = document.getElementById("scan-cam-reverse")?.checked;
-  const camView = c => camReverse ? (360 - c) : c;
   // One-sided window (mirrors scan/controller.occluded_positions): the arc blocks
   // the lens only while it LEADS the camera by 0..keepout° — 0<normalize(led−cam)
   // <=keepout. Level/behind (lead<=0) or led past the window (lead>keepout) is
-  // clear. keepout=0 disables the guard.
+  // clear. keepout=0 disables the guard. Camera angles may be negative (sweep the
+  // other way) — the math is on the signed configured angles directly.
   const blockedPairs = [];
   for (const l of ledPos) {
     for (const c of camPos) {
-      const lead = normalizeDeg(l - camView(c));
+      const lead = normalizeDeg(l - c);
       if (lead > 0 && lead <= keepout) blockedPairs.push([l, c]);
     }
   }
@@ -606,7 +603,7 @@ function updateScanEstimate() {
   if (blocked > 0) {
     const fmtDeg = v => (Math.round(v * 1e4) / 1e4).toString();
     listEl.innerHTML = blockedPairs
-      .map(([l, c]) => `LED ${fmtDeg(l)}° / CAM ${fmtDeg(camView(c))}°`)
+      .map(([l, c]) => `LED ${fmtDeg(l)}° / CAM ${fmtDeg(c)}°`)
       .join("<br>");
     box.style.display = "";
   } else {
@@ -619,7 +616,6 @@ function updateScanEstimate() {
  "scan-cam-start","scan-cam-stop","scan-cam-step","scan-keepout"].forEach(id => {
   document.getElementById(id)?.addEventListener("input", updateScanEstimate);
 });
-document.getElementById("scan-cam-reverse")?.addEventListener("change", updateScanEstimate);
 
 updateScanEstimate();
 
@@ -665,7 +661,6 @@ document.getElementById("btn-scan-start").addEventListener("click", async () => 
     output_folder:      document.getElementById("output-folder").value.trim() || "./captures",
     camera_arc_angle_deg: parseFloat(document.getElementById("scan-camera-arc").value),
     move_simultaneously: document.getElementById("scan-simultaneous").checked,
-    camera_reverse:      document.getElementById("scan-cam-reverse").checked,
     settle_s:           parseFloat(document.getElementById("scan-settle").value) || 5.0,
     precise_positioning: document.getElementById("scan-precise").checked,
     camera_keepout_deg: parseFloat(document.getElementById("scan-keepout").value) || 0,
