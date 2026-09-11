@@ -411,13 +411,22 @@ async def camera_info():
 
 @app.post("/api/camera/settings")
 async def camera_settings(req: CameraSettingsRequest):
-    if req.exposure_us is not None:
-        await camera.set_exposure(req.exposure_us)
-    if req.gain is not None:
-        await camera.set_gain(req.gain)
-    if req.reverse_x is not None or req.reverse_y is not None:
-        await camera.set_reverse(req.reverse_x, req.reverse_y)
-    return {"status": "ok", "info": await camera.get_info()}
+    # Pause the live grab loop while writing camera parameters. A control write
+    # (exposure/gain) landing in the middle of the preview's continuous buffer
+    # churn stalls this camera and wedges the USB link; with the grab loop paused
+    # the write lands on a quiet stream — how Cockpit changes settings live.
+    _camera_busy.set()
+    try:
+        if req.exposure_us is not None:
+            await camera.set_exposure(req.exposure_us)
+        if req.gain is not None:
+            await camera.set_gain(req.gain)
+        if req.reverse_x is not None or req.reverse_y is not None:
+            await camera.set_reverse(req.reverse_x, req.reverse_y)
+        info = await camera.get_info()
+    finally:
+        _camera_busy.clear()
+    return {"status": "ok", "info": info}
 
 
 class CameraCaptureRequest(BaseModel):

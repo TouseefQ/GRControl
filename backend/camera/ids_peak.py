@@ -854,7 +854,13 @@ class IDSCamera:
         return await asyncio.get_event_loop().run_in_executor(_executor, self._get_camera_info)
 
     def _set_exposure(self, exposure_us: float):
-        self._node_map.FindNode("ExposureTime").SetValue(exposure_us)
+        node = self._node_map.FindNode("ExposureTime")
+        try:
+            lo, hi = node.Minimum(), node.Maximum()
+            exposure_us = max(lo, min(hi, exposure_us))
+        except Exception:
+            pass
+        node.SetValue(exposure_us)
 
     async def set_exposure(self, exposure_us: float):
         if self._open:
