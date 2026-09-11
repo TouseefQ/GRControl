@@ -91,6 +91,31 @@ inline void biss_sampleDelay() { for (int n = 0; n < 30; n++) __asm__("nop;"); }
 #define OME85_SAMPLES  15    // majority-vote reads per angle (CRC unusable on this PCB)
 
 // ══════════════════════════════════════════════════════════════════════════════
+// Angle helper
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Home-relative angle, wrapped into (−180, 180], with optional sign inversion.
+//
+// Two things this fixes vs the old `fmod(raw − home + 360, 360)` → [0, 360):
+//  1) SEAM: a homed axis sits at 0. In [0,360) that is the 0/360 seam, so encoder
+//     read-noise dithers it 0.005 ↔ 359.995 — the flicker, and (worse) it makes
+//     initStepCounters() reseed the step counter to ~360°, so the next absolute
+//     MOVE sweeps a near-full turn. Wrapping to (−180,180] puts 0 in the MIDDLE
+//     of the range, so noise reads ∓0.005 and never crosses a discontinuity.
+//  2) SIGN: the OME85 (camera) and AS5600 #3 (LED arc) sit on the OUTPUT shaft,
+//     which turns OPPOSITE the motor (single gear mesh), so a +command reads −.
+//     `reversed=true` negates them so command, step counter, and encoder all
+//     agree (+5° command → +5° reading). Motor-shaft encoders pass reversed=false.
+float homeRelSigned(float raw, float homeOffset, bool reversed) {
+  float d = raw - homeOffset;
+  if (reversed) d = -d;
+  d = fmodf(d + 180.0f, 360.0f);
+  if (d < 0.0f) d += 360.0f;
+  d -= 180.0f;
+  return roundf(d * 10000.0f) / 10000.0f;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // Globals
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -272,13 +297,12 @@ float as5600DegSW() {
   return roundf(raw * 360.0f / 4096.0f * 10000.0f) / 10000.0f;
 }
 
-// LED motor shaft angle relative to home (0–360°, wraps every motor revolution).
+// LED motor shaft angle relative to home, signed (−180,180]. Motor-shaft encoder
+// (not on the output), so no sign inversion. Wraps every motor revolution.
 float as5600DegSWHome(float homeOffset) {
   int16_t raw = readAS5600RawSW();
   if (raw < 0) return 0.0f;
-  float deg = raw * 360.0f / 4096.0f;
-  deg = fmod(deg - homeOffset + 360.0f, 360.0f);
-  return roundf(deg * 10000.0f) / 10000.0f;
+  return homeRelSigned(raw * 360.0f / 4096.0f, homeOffset, false);
 }
 
 // ── PCA9685 minimal driver via software I2C ───────────────────────────────────
@@ -351,13 +375,12 @@ int16_t readAS5600Raw(TwoWire& bus) {
   return (int16_t)((hi & 0x0F) << 8) | lo;
 }
 
-// Angle from home position (0–360°).
-float encoderDeg(TwoWire& bus, float homeOffset) {
+// Angle from home position, signed (−180,180]. `reversed` negates the reading
+// for output-shaft encoders that turn opposite their motor (see homeRelSigned).
+float encoderDeg(TwoWire& bus, float homeOffset, bool reversed) {
   int16_t raw = readAS5600Raw(bus);
   if (raw < 0) return 0.0f;
-  float deg = raw * 360.0f / 4096.0f;
-  deg = fmod(deg - homeOffset + 360.0f, 360.0f);
-  return roundf(deg * 10000.0f) / 10000.0f;
+  return homeRelSigned(raw * 360.0f / 4096.0f, homeOffset, reversed);
 }
 
 // Raw absolute angle (0–360°), no home offset.
@@ -493,12 +516,12 @@ float ome85_raw_deg() {
   return (float)truePos / 65536.0f * 360.0f;
 }
 
-// Camera arm angle relative to stored home position.
+// Camera arm angle relative to stored home position, signed (−180,180]. OME85 is
+// on the output shaft (reversed vs the motor), so reversed=true.
 float ome85DegFromHome() {
   float raw = ome85_raw_deg();
   if (raw < 0.0f) return 0.0f;
-  float deg = fmod(raw - homeOffsetCamera + 360.0f, 360.0f);
-  return roundf(deg * 10000.0f) / 10000.0f;
+  return homeRelSigned(raw, homeOffsetCamera, true);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -587,13 +610,13 @@ void enableMotors(bool en) {
 void initStepCounters() {
   float camRaw = ome85_raw_deg();
   if (camRaw >= 0.0f) {
-    float camDeg = fmod(camRaw - homeOffsetCamera + 360.0f, 360.0f);
+    float camDeg = homeRelSigned(camRaw, homeOffsetCamera, true);  // signed, output-reversed
     motor1.setCurrentPosition(cameraAngleToSteps(camDeg));
-    lastCameraDeg = roundf(camDeg * 10000.0f) / 10000.0f;
+    lastCameraDeg = camDeg;
     cameraValid = true;
   }
   if (readAS5600Raw(Wire1) >= 0) {
-    float ledDeg = encoderDeg(Wire1, homeOffsetLed);
+    float ledDeg = encoderDeg(Wire1, homeOffsetLed, true);  // LED arc output (reversed)
     motor2.setCurrentPosition(ledAngleToSteps(ledDeg));
   }
 }
@@ -647,9 +670,9 @@ void sendTelemetry() {
   StaticJsonDocument<512> doc;
   doc["type"]            = "STATE";
   doc["ts"]              = millis();
-  // Motor shaft encoders relative to home (0–360°, wrap every motor revolution)
-  doc["enc_motor1_deg"]  = encoderDeg(Wire, homeOffsetMotor1);  // camera motor shaft (AS5600 #1)
-  doc["enc_motor2_deg"]  = as5600DegSWHome(homeOffsetMotor2);   // LED motor shaft (AS5600 #2)
+  // Motor shaft encoders relative to home, signed (−180,180]; wrap every motor rev
+  doc["enc_motor1_deg"]  = encoderDeg(Wire, homeOffsetMotor1, false);  // camera motor shaft (AS5600 #1)
+  doc["enc_motor2_deg"]  = as5600DegSWHome(homeOffsetMotor2);          // LED motor shaft (AS5600 #2)
   // Output shaft encoders relative to home. The OME85 read is blocking (~4 ms,
   // interrupts off), so only read it when the camera motor is idle — otherwise
   // it would stall motor1.run() and roughen the motion. Reuse the cached value
@@ -658,8 +681,7 @@ void sendTelemetry() {
   if (!motor1Moving) {
     float raw = ome85_raw_deg();
     if (raw >= 0.0f) {
-      float deg = fmod(raw - homeOffsetCamera + 360.0f, 360.0f);
-      lastCameraDeg = roundf(deg * 10000.0f) / 10000.0f;
+      lastCameraDeg = homeRelSigned(raw, homeOffsetCamera, true);  // signed, output-reversed
       cameraValid = true;
     } else {
       cameraValid = false;
@@ -670,8 +692,7 @@ void sendTelemetry() {
 
   int16_t ledArcRaw = readAS5600Raw(Wire1);                  // LED arc rod (AS5600 #3)
   if (ledArcRaw >= 0) {
-    float deg = fmod(ledArcRaw * 360.0f / 4096.0f - homeOffsetLed + 360.0f, 360.0f);
-    doc["enc_led_arc_deg"] = roundf(deg * 10000.0f) / 10000.0f;
+    doc["enc_led_arc_deg"] = homeRelSigned(ledArcRaw * 360.0f / 4096.0f, homeOffsetLed, true);
   } else {
     doc["enc_led_arc_deg"] = nullptr;
   }
@@ -924,8 +945,7 @@ void loop() {
     motor1Moving = false;
     float raw = ome85_raw_deg();
     if (raw >= 0.0f) {
-      float deg = fmod(raw - homeOffsetCamera + 360.0f, 360.0f);
-      lastCameraDeg = roundf(deg * 10000.0f) / 10000.0f;
+      lastCameraDeg = homeRelSigned(raw, homeOffsetCamera, true);  // signed, output-reversed
       cameraValid = true;
     } else {
       cameraValid = false;
@@ -934,7 +954,7 @@ void loop() {
   }
   if (motor2Moving && motor2.distanceToGo() == 0) {
     motor2Moving = false;
-    sendMoveDone(2, encoderDeg(Wire1, homeOffsetLed));
+    sendMoveDone(2, encoderDeg(Wire1, homeOffsetLed, true));  // LED arc output (reversed)
   }
 
   // Auto-disable the drivers after they've been idle a while, to silence the

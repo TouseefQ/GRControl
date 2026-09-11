@@ -219,10 +219,10 @@ Sent automatically at the configured telemetry interval (default 100 ms).
 | Field             | Type          | Description                                                     |
 |-------------------|---------------|-----------------------------------------------------------------|
 | ts                | uint32        | Timestamp in ms since ESP32 boot                                |
-| enc_motor1_deg    | float         | AS5600 #1 on Motor 1 (camera) shaft                             |
-| enc_motor2_deg    | float         | AS5600 #2 on Motor 2 (LED arc) shaft                            |
-| enc_led_arc_deg   | float \| null | AS5600 #3 on LED arc output shaft (final); `null` if read failed |
-| enc_camera_deg    | float \| null | OME85 on camera output gear (final); `null` if read failed      |
+| enc_motor1_deg    | float         | AS5600 #1 on Motor 1 (camera) shaft; home-relative, signed (−180, 180] |
+| enc_motor2_deg    | float         | AS5600 #2 on Motor 2 (LED arc) shaft; home-relative, signed (−180, 180] |
+| enc_led_arc_deg   | float \| null | AS5600 #3 on LED arc output shaft (final); home-relative, signed (−180, 180], sign-corrected to the motor; `null` if read failed |
+| enc_camera_deg    | float \| null | OME85 on camera output gear (final); home-relative, signed (−180, 180], sign-corrected to the motor; `null` if read failed      |
 | cmd_camera_deg    | float         | Commanded camera angle (from the step counter)                  |
 | cmd_led_deg       | float         | Commanded LED-arc angle (from the step counter)                 |
 | motor1_moving     | bool          | True if motor 1 (camera) is currently stepping                  |
@@ -292,11 +292,24 @@ Sent when a `MOVE` command completes (motor has reached target and stopped).
 
 ## 5. Encoder Reading Notes
 
+**Home-relative angle convention (firmware `homeRelSigned`).** All `enc_*` values
+are reported as `raw − home` **wrapped into (−180, 180]**, not `[0, 360)`. This
+keeps a homed axis (0°) in the *middle* of the range instead of on the 0/360
+seam — otherwise encoder read-noise dithers a homed axis 0.005 ↔ 359.995 (visible
+flicker) and, worse, makes the step-counter resync (`initStepCounters`) seed ~360°
+so the next absolute `MOVE` sweeps a near-full turn.
+
+**Output-encoder sign inversion.** The two *output-shaft* encoders — OME85
+(camera) and AS5600 #3 (LED arc) — sit after a single gear mesh, so they rotate
+**opposite** to their motor. Their reported angle is **negated** so a `+` command
+reads `+` and agrees with the step counter and the closed-loop refinement. The two
+*motor-shaft* encoders (AS5600 #1/#2) are not inverted.
+
 ### AS5600 (I2C, address 0x36 and 0x37)
 
 - Read registers `0x0C` (high byte) and `0x0D` (low byte) for 12-bit raw angle.
 - Raw value range: 0–4095 → convert to degrees: `angle = raw * 360.0 / 4096.0`
-- Apply home offset: `angle_deg = fmod(raw_deg - home_offset + 360.0, 360.0)`
+- Apply home offset, signed: `angle_deg = homeRelSigned(raw_deg, home_offset, reversed)` — wrap `(raw_deg − home)` (negated for the output encoder) into (−180, 180].
 - If two AS5600s share the same I2C bus, use an I2C multiplexer (TCA9548A) or use separate I2C buses on the ESP32 (ESP32 supports 2 hardware I2C peripherals).
 
 ### OME85 (BiSS-C over SPI, camera output gear)
@@ -316,7 +329,7 @@ encoder, read over a BiSS-C interface on the SPI pins (via an RS422 transceiver)
   vote** (readings within 2 counts fold together to absorb LSB dither); the stuck
   top bit is masked so the field is used as 16 bits.
 - Angle conversion: `angle = (position & 0xFFFF) / 65536.0 * 360.0`
-- Apply the home offset like the AS5600: `angle_deg = fmod(angle - home + 360.0, 360.0)`
+- Apply the home offset, signed and sign-corrected (camera output is reversed): `angle_deg = homeRelSigned(angle, home, true)` — wrap `−(angle − home)` into (−180, 180].
 - The read is **blocking (~4 ms)** and only valid while the camera motor is
   stationary.
 

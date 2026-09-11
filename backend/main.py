@@ -96,10 +96,20 @@ async def _on_esp32_message(msg: dict):
     mtype = msg.get("type")
 
     if mtype == "STATE":
-        device_state.encoder.motor1_deg = msg.get("enc_motor1_deg", 0.0)
-        device_state.encoder.motor2_deg = msg.get("enc_motor2_deg", 0.0)
-        device_state.encoder.led_arc_deg = msg.get("enc_led_arc_deg")
-        device_state.encoder.camera_deg = msg.get("enc_camera_deg")
+        # The firmware reports absolute-encoder angles in [0, 360), so a homed
+        # axis sits exactly on the 0/360 seam and read-noise makes it flicker
+        # 0.005 ↔ 359.995. Normalize to (-180, 180] on the way in so home is 0
+        # in the MIDDLE of the range (noise reads -0.005/+0.005, no seam to
+        # cross) and every consumer sees a stable, signed angle. NOTE: this is a
+        # display/record fix only — the firmware still computes MOVE deltas from
+        # its own raw [0,360) encoder, so the runaway absolute-move must be fixed
+        # in firmware (normalize the delta there too).
+        def _norm(v):
+            return round(motion.normalize_deg(v), 4) if v is not None else None
+        device_state.encoder.motor1_deg = _norm(msg.get("enc_motor1_deg", 0.0))
+        device_state.encoder.motor2_deg = _norm(msg.get("enc_motor2_deg", 0.0))
+        device_state.encoder.led_arc_deg = _norm(msg.get("enc_led_arc_deg"))
+        device_state.encoder.camera_deg = _norm(msg.get("enc_camera_deg"))
         device_state.encoder.cmd_camera_deg = msg.get("cmd_camera_deg")
         device_state.encoder.cmd_led_deg = msg.get("cmd_led_deg")
         device_state.motor1_moving = msg.get("motor1_moving", False)
