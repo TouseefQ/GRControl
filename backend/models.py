@@ -142,19 +142,18 @@ class Settings(BaseSettings):
     led_gear_ratio: float = 3.0
 
     # ── Camera / LED-arc occlusion guard ─────────────────────────────────────
-    # The LED arc blocks the lens when it rotates AHEAD of the camera (as seen
-    # from the sample). At home both axes are 0° and the arc rests at the lens
-    # edge, so a position is occluded when the arc LEADS the camera by more than
-    # this margin:  normalize(led − cam_view) > camera_keepout_deg. The scan
-    # SKIPS those positions (does not capture them).
+    # The LED arc blocks the lens only while it rotates AHEAD of the camera within
+    # a limited span (as seen from the sample). At home both axes are 0° and the
+    # arc rests at the lens edge (clear); as it leads the camera it moves into the
+    # view and blocks it, then swings clear once it has led far enough. Measured on
+    # the rig: it blocks while leading by 0–50°. A position is occluded when:
     #
-    #   0  (default) → capture only led ≤ cam; skip led > cam  (arc in front)
-    #   +m           → tolerate the arc leading by up to m° before skipping
-    #   −m           → also skip within m° below the camera (more conservative)
+    #     0 < normalize(led − cam_view) <= camera_keepout_deg
     #
-    # Directional rule, NOT a symmetric window: a pair with the arc behind the
-    # camera (led < cam) is never skipped. See scan/controller.occluded_positions.
-    camera_keepout_deg: float = 0.0
+    # camera_keepout_deg is the max lead angle that still blocks (default 50°). The
+    # scan SKIPS occluded positions. Arc level-with/behind the camera (lead <= 0)
+    # or led past the window (lead > keepout) is captured. 0 disables the guard.
+    camera_keepout_deg: float = 50.0
 
     # ── Camera USB bandwidth pacing ──────────────────────────────────────────
     # THE fix for the GC_ERR_TIMEOUT / incomplete-buffer stalls on this rig

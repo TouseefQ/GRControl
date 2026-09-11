@@ -579,13 +579,15 @@ function updateScanEstimate() {
   // occlusion geometry and the skipped-list must use it too. Mirrors the backend.
   const camReverse = document.getElementById("scan-cam-reverse")?.checked;
   const camView = c => camReverse ? (360 - c) : c;
-  // Directional rule (mirrors scan/controller.occluded_positions): the LED arc
-  // blocks the lens only when it LEADS the camera by more than the margin —
-  // normalize(led − cam) > keepout. led ≤ cam (arc level/behind) is always kept.
+  // One-sided window (mirrors scan/controller.occluded_positions): the arc blocks
+  // the lens only while it LEADS the camera by 0..keepout° — 0<normalize(led−cam)
+  // <=keepout. Level/behind (lead<=0) or led past the window (lead>keepout) is
+  // clear. keepout=0 disables the guard.
   const blockedPairs = [];
   for (const l of ledPos) {
     for (const c of camPos) {
-      if (normalizeDeg(l - camView(c)) > keepout) blockedPairs.push([l, c]);
+      const lead = normalizeDeg(l - camView(c));
+      if (lead > 0 && lead <= keepout) blockedPairs.push([l, c]);
     }
   }
   const blocked = blockedPairs.length;

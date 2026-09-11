@@ -550,11 +550,11 @@ async def camera_stream():
 
 @app.post("/api/scan/start")
 async def scan_start(config: ScanConfig):
-    # Occlusion guard: positions where the LED arc leads the camera and would sit
-    # in front of the lens (normalize(θled − θcam) > lead margin) are skipped, not
-    # scanned — the controller drops them and captures the rest. Only refuse
-    # outright if EVERY grid position is occluded, since then there is nothing to
-    # capture.
+    # Occlusion guard: positions where the LED arc leads the camera within the
+    # blocking window (0 < normalize(θled − θcam) <= block angle) sit in front of
+    # the lens and are skipped, not scanned — the controller drops them and
+    # captures the rest. Only refuse outright if EVERY grid position is occluded,
+    # since then there is nothing to capture.
     blocked = scan_ctrl.occluded_positions(config)
     total_pairs = len(config.led_axis.positions) * len(config.camera_axis.positions)
     if blocked and len(blocked) >= total_pairs:
@@ -562,10 +562,10 @@ async def scan_start(config: ScanConfig):
         raise HTTPException(
             422,
             f"All {total_pairs} scan position(s) have the LED arc leading the "
-            f"camera by more than the {keepout:g}° lead margin — the arc would "
-            f"block the lens's view of the sample at every position. Ensure the "
-            f"camera range reaches at least the LED-arc angles, or raise the lead "
-            f"margin.",
+            f"camera within the {keepout:g}° blocking window — the arc would block "
+            f"the lens's view of the sample at every position. Reach camera angles "
+            f"at/above the LED-arc angles, or extend the LED sweep past the block "
+            f"angle so some positions clear.",
         )
     ok = await scan_ctrl.start(config)
     if not ok:
@@ -580,8 +580,8 @@ async def scan_start(config: ScanConfig):
         more = "" if len(blocked) <= 5 else f" (+{len(blocked) - 5} more)"
         resp["skipped"] = len(blocked)
         resp["skipped_message"] = (
-            f"{len(blocked)} position(s) skipped — LED arc leads the camera by "
-            f"more than the {keepout:g}° margin (blocks the lens): {sample}{more}"
+            f"{len(blocked)} position(s) skipped — LED arc leads the camera within "
+            f"the {keepout:g}° blocking window (blocks the lens): {sample}{more}"
         )
     return resp
 
