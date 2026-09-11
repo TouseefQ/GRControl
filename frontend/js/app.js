@@ -548,9 +548,15 @@ function countPositions(start, stop, step) {
 // a 1e-9 slack, rounded to 4 dp — so the client occlusion count matches the
 // server's guard exactly.
 function axisPositions(start, stop, step) {
-  if (step <= 0) return [];
+  // Mirrors backend models.ScanAxis.positions: inclusive start→stop, direction
+  // follows start→stop (descending when stop < start, e.g. 0 → −180), step is a
+  // magnitude.
+  const mag = Math.abs(step);
+  if (mag < 1e-9 || isNaN(start) || isNaN(stop)) return [];
+  const sign = stop >= start ? 1 : -1;
+  const n = Math.floor(Math.abs(stop - start) / mag + 1e-9);
   const out = [];
-  for (let a = start; a <= stop + 1e-9; a += step) out.push(Math.round(a * 1e4) / 1e4);
+  for (let i = 0; i <= n; i++) out.push(Math.round((start + sign * mag * i) * 1e4) / 1e4);
   return out;
 }
 
