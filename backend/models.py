@@ -102,6 +102,13 @@ class ScanConfig(BaseModel):
     # Optional per-scan override of the LED-arc lead margin (deg). None → use
     # Settings.camera_keepout_deg. See Settings for the rule.
     camera_keepout_deg: Optional[float] = None
+    # When True, led_axis values are OFFSETS relative to the camera position:
+    # the LED-arc motor target = camera_pos + led_offset. Used by the "New Scan"
+    # (single-geometry, relative) workflow. False → led_axis values are absolute.
+    led_relative: bool = False
+    # Number of images to capture per LED at each position. The LED stays lit
+    # across all repeats, then turns off. 1 = original behavior (one shot/LED).
+    repeats_per_led: int = 1
 
 
 class ScanProgress(BaseModel):

@@ -318,6 +318,95 @@
       </div>
     </div>
 
+    <!-- 2b. New Scan Configuration — single geometry, LED arc relative to camera -->
+    <div class="card">
+      <div class="card-title">New Scan Configuration</div>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
+        Single-geometry measurement. Set the camera arc angle and the LED arc angle
+        <em>relative to the camera</em> — the software commands the LED arc to
+        <code>camera + relative</code>. At that geometry each enabled LED lights in
+        turn for N photos. One JSON is saved for the whole run. No occlusion guard —
+        manage arc blocking manually.
+      </p>
+
+      <div class="scan-axis-grid">
+        <div>
+          <div class="field"><label>Camera arc angle (°)</label>
+            <input type="number" id="nscan-cam-angle" value="0" min="-360" max="360" step="0.1" /></div>
+          <div class="field mt-8"><label>LED arc angle relative to camera (°)</label>
+            <input type="number" id="nscan-led-rel" value="45" min="-360" max="360" step="0.1" /></div>
+        </div>
+        <div>
+          <div class="field"><label>Photos per LED</label>
+            <input type="number" id="nscan-repeats" value="5" min="1" max="999" step="1" /></div>
+          <div class="field mt-8">
+            <label>Move speed (%): <span id="nscan-speed-val">80</span></label>
+            <input type="range" id="nscan-speed" min="1" max="100" value="80" />
+          </div>
+        </div>
+      </div>
+
+      <!-- LED pattern -->
+      <div class="mt-8">
+        <label style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px;display:block;">LEDs Active During Scan</label>
+        <div id="nscan-led-pattern" style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px;"></div>
+      </div>
+
+      <!-- Options -->
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;align-items:center;">
+        <label class="inline-label">
+          Camera arc angle (°):
+          <select id="nscan-camera-arc" style="margin-left:6px;"
+                  title="Physical slit the camera is mounted in on the arc (viewing elevation). Constant for the run; recorded in every image's JSON sidecar.">
+            <option value="20" selected>20</option>
+            <option value="25">25</option>
+            <option value="30">30</option>
+            <option value="35">35</option>
+            <option value="40">40</option>
+            <option value="45">45</option>
+            <option value="50">50</option>
+            <option value="55">55</option>
+          </select>
+        </label>
+        <label class="inline-label">
+          Image format:
+          <select id="nscan-format" style="margin-left:6px;">
+            <option value="tiff" selected>TIFF</option>
+            <option value="png">PNG</option>
+            <option value="bmp">BMP</option>
+            <option value="jpeg">JPEG</option>
+          </select>
+        </label>
+        <label class="inline-label">
+          Settle before capture (s):
+          <input type="number" id="nscan-settle" value="5" min="0" max="120" step="0.5"
+                 style="width:70px;margin-left:6px;" />
+        </label>
+        <label class="inline-label">
+          <input type="checkbox" id="nscan-precise" checked />
+          Precise positioning (encoder closed-loop)
+        </label>
+      </div>
+
+      <div class="field mt-8">
+        <label>Output folder</label>
+        <input type="text" id="nscan-output" value="./captures" />
+      </div>
+
+      <!-- Capture count -->
+      <div style="margin-top:12px;font-size:12px;color:var(--text-dim);">
+        Total captures: <span id="nscan-count" style="color:var(--text);font-weight:600;">—</span>
+      </div>
+
+      <div class="btn-row mt-8">
+        <button class="btn btn-success" id="btn-nscan-start">▶ Start New Scan</button>
+      </div>
+      <p style="font-size:11px;color:var(--text-dim);margin-top:8px;">
+        Pause / Resume / Abort and progress appear below (shared with the scan above —
+        only one scan runs at a time).
+      </p>
+    </div>
+
     <!-- Scan progress (shown only while scanning) -->
     <div class="card" id="scan-progress-card" style="display:none;">
       <div class="card-title">Scan Progress</div>

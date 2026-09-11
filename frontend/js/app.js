@@ -651,6 +651,7 @@ function setScanRunning(running, paused) {
   _scanRunning = running;
   _scanPaused  = paused;
   document.getElementById("btn-scan-start").classList.toggle("hidden", running);
+  document.getElementById("btn-nscan-start").classList.toggle("hidden", running);
   document.getElementById("btn-scan-pause").classList.toggle("hidden", !running || paused);
   document.getElementById("btn-scan-resume").classList.toggle("hidden", !paused);
   document.getElementById("btn-scan-abort").classList.toggle("hidden", !running);
@@ -700,6 +701,101 @@ document.getElementById("btn-scan-start").addEventListener("click", async () => 
     if (res && res.skipped) logWarn(res.skipped_message);
   } catch (e) {
     logErr(`Scan start failed: ${e.message}`);
+  }
+});
+
+// ── New Scan Configuration (single geometry, LED arc relative to camera) ──────
+
+// Build the LED pattern grid: enable checkbox + per-LED PWM number input.
+const nscanLedPattern = document.getElementById("nscan-led-pattern");
+for (let i = 0; i < 7; i++) {
+  const label = document.createElement("label");
+  label.className = "inline-label";
+  label.style.flexDirection = "column";
+  label.style.alignItems = "center";
+  label.style.gap = "4px";
+  label.style.fontSize = "11px";
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.id = `nscan-led-${i}`;
+  cb.checked = (i === 0);   // default: only L1 selected
+  cb.addEventListener("change", updateNScanEstimate);
+  label.appendChild(cb);
+  label.appendChild(document.createTextNode(`L${i + 1}`));
+  const ang = document.createElement("span");
+  ang.textContent = `${LED_ARC_ANGLES_DEG[i]}°`;
+  ang.style.color = "var(--text-dim)";
+  ang.style.fontSize = "10px";
+  label.appendChild(ang);
+  const pwm = document.createElement("input");
+  pwm.type = "number";
+  pwm.className = "led-brightness";
+  pwm.id = `nscan-led-bright-${i}`;
+  pwm.min = 0; pwm.max = 255; pwm.value = 255;
+  pwm.title = `LED ${i + 1} scan PWM (0–255)`;
+  pwm.addEventListener("input", () => {
+    let v = parseInt(pwm.value);
+    if (isNaN(v)) return;
+    pwm.value = Math.max(0, Math.min(255, v));
+  });
+  label.appendChild(pwm);
+  nscanLedPattern.appendChild(label);
+}
+
+document.getElementById("nscan-speed").addEventListener("input", e => {
+  document.getElementById("nscan-speed-val").textContent = e.target.value;
+});
+
+function updateNScanEstimate() {
+  const activeLeds = Array.from({ length: 7 }, (_, i) =>
+    document.getElementById(`nscan-led-${i}`)?.checked
+  ).filter(Boolean).length;
+  const repeats = Math.max(1, parseInt(document.getElementById("nscan-repeats").value) || 1);
+  document.getElementById("nscan-count").textContent = (activeLeds * repeats).toLocaleString();
+}
+
+document.getElementById("nscan-repeats").addEventListener("input", updateNScanEstimate);
+updateNScanEstimate();
+
+document.getElementById("btn-nscan-start").addEventListener("click", async () => {
+  const enabledLeds = Array.from({ length: 7 }, (_, i) =>
+    document.getElementById(`nscan-led-${i}`)?.checked ?? false
+  );
+  const ledBrights = Array.from({ length: 7 }, (_, i) => {
+    const v = parseInt(document.getElementById(`nscan-led-bright-${i}`)?.value);
+    return isNaN(v) ? 255 : Math.max(0, Math.min(255, v));
+  });
+
+  const cam     = parseFloat(document.getElementById("nscan-cam-angle").value) || 0;
+  const rel     = parseFloat(document.getElementById("nscan-led-rel").value) || 0;
+  const speed   = parseInt(document.getElementById("nscan-speed").value) || 80;
+  const repeats = Math.max(1, parseInt(document.getElementById("nscan-repeats").value) || 1);
+
+  // Reuse the grid-scan engine as a 1×1 special case: single-value axes, LED
+  // axis carried as an offset (led_relative), occlusion guard off. The backend
+  // resolves the LED-arc target to camera + relative.
+  const config = {
+    led_axis:    { start_deg: rel, stop_deg: rel, step_deg: 1, speed_pct: speed },
+    camera_axis: { start_deg: cam, stop_deg: cam, step_deg: 1, speed_pct: speed },
+    led_pattern: { enabled: enabledLeds, brightness: ledBrights },
+    image_format:         document.getElementById("nscan-format").value,
+    output_folder:        document.getElementById("nscan-output").value.trim() || "./captures",
+    camera_arc_angle_deg: parseFloat(document.getElementById("nscan-camera-arc").value),
+    move_simultaneously:  true,
+    settle_s:             parseFloat(document.getElementById("nscan-settle").value) || 5.0,
+    precise_positioning:  document.getElementById("nscan-precise").checked,
+    camera_keepout_deg:   0,      // no occlusion guard — operator manages blocking
+    led_relative:         true,
+    repeats_per_led:      repeats,
+  };
+
+  try {
+    const res = await api.scanStart(config);
+    setScanRunning(true, false);
+    logOk("New scan started");
+    if (res && res.skipped) logWarn(res.skipped_message);
+  } catch (e) {
+    logErr(`New scan start failed: ${e.message}`);
   }
 });
 

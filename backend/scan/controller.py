@@ -174,7 +174,8 @@ class ScanController:
         # scanned. Size the total to only the pairs we will actually capture.
         occluded = set(self.occluded_positions(cfg))
         scanned_pairs = len(led_positions) * len(cam_positions) - len(occluded)
-        total = scanned_pairs * len(active_leds)
+        repeats = max(1, int(getattr(cfg, "repeats_per_led", 1)))
+        total = scanned_pairs * len(active_leds) * repeats
         self._progress = ScanProgress(
             running=True,
             total_positions=total,
@@ -225,12 +226,21 @@ class ScanController:
                     while self._progress.paused:
                         await asyncio.sleep(0.1)
 
-                    # Move motors (camera to cam_pos, LED to led_pos). Both are the
-                    # configured angles directly — a negative camera angle simply
-                    # sweeps the arm the other way (firmware MOVE is absolute).
-                    await self._move_to(led_pos, cam_pos, cfg)
+                    # Resolve the LED-arc motor target. In relative mode the
+                    # configured led_pos is an OFFSET from the camera: the arc is
+                    # commanded to camera_pos + offset so the geometry tracks the
+                    # camera. Otherwise led_pos is the absolute arc angle.
+                    led_cmd = (cam_pos + led_pos) if cfg.led_relative else led_pos
+                    led_offset = led_pos if cfg.led_relative else None
 
-                    # Per-LED capture
+                    # Move motors (camera to cam_pos, LED arc to led_cmd). A
+                    # negative angle simply sweeps the arm the other way (firmware
+                    # MOVE is absolute).
+                    await self._move_to(led_cmd, cam_pos, cfg)
+
+                    # Per-LED capture. The LED is lit once, held while the arm
+                    # settles, then captured `repeats` times, then turned off —
+                    # so all repeats of one LED share a single on/off cycle.
                     for led_idx in active_leds:
                         while self._progress.paused:
                             await asyncio.sleep(0.1)
@@ -253,42 +263,51 @@ class ScanController:
                             await asyncio.sleep(step)
                             waited += step
 
-                        # Capture
-                        filename = self._make_filename(
-                            cfg.output_folder, led_pos, cam_pos, led_idx, cfg.image_format
-                        )
-                        metadata = self._make_metadata(led_pos, cam_pos, led_idx, brightness)
-                        saved_path = await self._camera.capture(
-                            filename, cfg.image_format, metadata
-                        )
-                        # Store per-image metadata in the scan record. The camera
-                        # module mutates `metadata` in-place (adds pixel_format,
-                        # raw_bayer, bit_depth, preview_png for TIFF), so reading
-                        # it here captures those camera-level fields too.
-                        img_key = os.path.basename(filename)
-                        _scan_records[img_key] = metadata
-                        if not saved_path:
-                            metadata["capture_failed"] = True
+                        for rep in range(1, repeats + 1):
+                            while self._progress.paused:
+                                await asyncio.sleep(0.1)
 
-                        # Turn LED off
-                        await self._esp.send_raw(cmd_led_set(led_idx, 0, 0))
-
-                        if saved_path:
-                            self._progress.images_captured += 1
-                            if self._image_cb:
-                                preview = await self._camera.grab_preview_jpeg()
-                                if preview:
-                                    await self._image_cb(saved_path, preview)
-                        else:
-                            self._progress.errors.append(
-                                f"Capture failed at LED={led_pos}° CAM={cam_pos}° LED#{led_idx}"
+                            # Capture
+                            filename = self._make_filename(
+                                cfg.output_folder, led_cmd, cam_pos, led_idx,
+                                cfg.image_format, rep, repeats
                             )
+                            metadata = self._make_metadata(
+                                led_cmd, cam_pos, led_idx, brightness,
+                                rep, repeats, led_offset
+                            )
+                            saved_path = await self._camera.capture(
+                                filename, cfg.image_format, metadata
+                            )
+                            # Store per-image metadata in the scan record. The camera
+                            # module mutates `metadata` in-place (adds pixel_format,
+                            # raw_bayer, bit_depth, preview_png for TIFF), so reading
+                            # it here captures those camera-level fields too.
+                            img_key = os.path.basename(filename)
+                            _scan_records[img_key] = metadata
+                            if not saved_path:
+                                metadata["capture_failed"] = True
 
-                        self._progress.current_position += 1
-                        self._progress.current_led_pos_deg = _abs360(led_pos)
-                        self._progress.current_cam_pos_deg = _abs360(cam_pos)
-                        self._progress.current_led_index = led_idx
-                        await self._emit_progress()
+                            if saved_path:
+                                self._progress.images_captured += 1
+                                if self._image_cb:
+                                    preview = await self._camera.grab_preview_jpeg()
+                                    if preview:
+                                        await self._image_cb(saved_path, preview)
+                            else:
+                                self._progress.errors.append(
+                                    f"Capture failed at LED={led_cmd}° CAM={cam_pos}° "
+                                    f"LED#{led_idx} rep{rep}"
+                                )
+
+                            self._progress.current_position += 1
+                            self._progress.current_led_pos_deg = _abs360(led_cmd)
+                            self._progress.current_cam_pos_deg = _abs360(cam_pos)
+                            self._progress.current_led_index = led_idx
+                            await self._emit_progress()
+
+                        # Turn LED off after all repeats
+                        await self._esp.send_raw(cmd_led_set(led_idx, 0, 0))
 
         except asyncio.CancelledError:
             log.info("Scan aborted")
@@ -369,20 +388,34 @@ class ScanController:
                             "at LED=%.3f° — open-loop fallback", led_pos)
 
     def _make_filename(self, folder: str, led_pos: float, cam_pos: float,
-                       led_idx: int, fmt: str) -> str:
+                       led_idx: int, fmt: str, rep: int = 1,
+                       total_reps: int = 1) -> str:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         # Absolute [0,360) angles in the name so a −10 sweep reads CAM_350.000.
+        # A repeat suffix (_rep02, …) is only added when more than one image is
+        # taken per LED, so single-shot scan filenames are unchanged.
+        rep_tag = f"_rep{rep:02d}" if total_reps > 1 else ""
         name = (f"LED_{_abs360(led_pos):07.3f}deg_CAM_{_abs360(cam_pos):07.3f}deg"
-                f"_LED{led_idx:02d}_{timestamp}.{fmt}")
+                f"_LED{led_idx:02d}{rep_tag}_{timestamp}.{fmt}")
         return os.path.join(folder, name)
 
     def _make_metadata(self, led_pos: float, cam_pos: float,
-                       led_idx: int, brightness: int) -> dict:
+                       led_idx: int, brightness: int, rep: int = 1,
+                       total_reps: int = 1,
+                       led_offset: Optional[float] = None) -> dict:
         return {
             "timestamp": datetime.now().isoformat(),
             # Recorded angles are absolute [0,360): a −10 sweep is recorded as 350.
             "led_target_deg": _abs360(led_pos),
             "camera_target_deg": _abs360(cam_pos),
+            # In relative mode, the offset the LED arc was placed at ahead of the
+            # camera (led_target_deg = camera_target_deg + this). None if the run
+            # used absolute LED angles.
+            "led_relative_offset_deg": (round(led_offset, 4)
+                                        if led_offset is not None else None),
+            # Which repeat this image is (1-based) and how many per LED.
+            "repeat_index": rep,
+            "repeats_total": total_reps,
             # Physical camera-arc mounting slit (viewing elevation) for this run;
             # operator-set, constant across the scan (see ScanConfig).
             "camera_arc_angle_deg": getattr(self._config, "camera_arc_angle_deg", None),
