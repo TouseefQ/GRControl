@@ -101,8 +101,8 @@ class ScanConfig(BaseModel):
     # Closed-loop precise positioning: after the coarse move, nudge each motor
     # until its output encoder reads the target within tolerance.
     precise_positioning: bool = True
-    # Optional per-scan override of the camera keep-out half-angle (deg). None →
-    # use Settings.camera_keepout_deg. See Settings for what it guards against.
+    # Optional per-scan override of the LED-arc lead margin (deg). None → use
+    # Settings.camera_keepout_deg. See Settings for the rule.
     camera_keepout_deg: Optional[float] = None
 
 
@@ -142,16 +142,18 @@ class Settings(BaseSettings):
     led_gear_ratio: float = 3.0
 
     # ── Camera / LED-arc occlusion guard ─────────────────────────────────────
-    # The LED arc blocks the lens's view of the sample when the two axes are
-    # angularly close, as seen from the sample. A scan position (led, cam) is
-    # occluded when |normalize(cam − led)| < camera_keepout_deg. The scan refuses
-    # to start if any grid position falls inside this window.
+    # The LED arc blocks the lens when it rotates AHEAD of the camera (as seen
+    # from the sample). At home both axes are 0° and the arc rests at the lens
+    # edge, so a position is occluded when the arc LEADS the camera by more than
+    # this margin:  normalize(led − cam_view) > camera_keepout_deg. The scan
+    # SKIPS those positions (does not capture them).
     #
-    # The value is rig geometry: ~ atan(r_lens / R_cam) + atan((w_arc/2) / R_led),
-    # with r_lens = 2.25 cm (4.5 cm lens). Best set from an empirical sweep (park
-    # the camera, sweep the arc through it in the live preview, note the blocked
-    # span, halve it, add margin). DEFAULT 0.0 = guard DISABLED — set your
-    # calibrated half-angle here or via GR_camera_keepout_deg to turn it on.
+    #   0  (default) → capture only led ≤ cam; skip led > cam  (arc in front)
+    #   +m           → tolerate the arc leading by up to m° before skipping
+    #   −m           → also skip within m° below the camera (more conservative)
+    #
+    # Directional rule, NOT a symmetric window: a pair with the arc behind the
+    # camera (led < cam) is never skipped. See scan/controller.occluded_positions.
     camera_keepout_deg: float = 0.0
 
     # ── Camera USB bandwidth pacing ──────────────────────────────────────────

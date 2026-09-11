@@ -85,8 +85,8 @@ class ScanController:
     # ── Public control ────────────────────────────────────────────────────────
 
     def keepout_deg(self, config: ScanConfig) -> float:
-        """Effective camera keep-out half-angle for this run: the per-scan
-        override if set, else the workspace default. <= 0 disables the guard."""
+        """Effective LED-arc lead margin (deg) for this run: the per-scan override
+        if set, else the workspace default. See occluded_positions for meaning."""
         ko = config.camera_keepout_deg
         return self._settings.camera_keepout_deg if ko is None else ko
 
@@ -104,19 +104,31 @@ class ScanController:
         return round(360.0 - cam_pos, 4) if reverse else cam_pos
 
     def occluded_positions(self, config: ScanConfig) -> list[tuple[float, float]]:
-        """Every (led_pos, cam_pos) grid pair where the LED arc would sit in
-        front of the lens — |normalize(cam − led)| < keep-out, as seen from the
-        sample. Empty when the guard is disabled (keep-out <= 0). Uses the
-        effective (recorded) camera angle so the geometry is correct in reverse
-        mode; the returned cam_pos is the raw configured value for membership."""
+        """Every (led_pos, cam_pos) grid pair where the LED arc leads the camera
+        and would sit in front of the lens, so it must be skipped.
+
+        At home (both 0°) the LED arc rests at the edge of the lens. As the arc
+        rotates AHEAD of the camera it moves into the lens's view; level with or
+        behind the camera it's clear. So a pair is occluded when the arc leads the
+        camera by more than the keep-out margin:
+
+            normalize(led − cam_view) > keepout
+
+        keepout (deg, default 0) is how far the arc may lead before it blocks:
+          0  → capture only led ≤ cam (arc level or behind); skip led > cam
+          +m → tolerate the arc leading by up to m° before skipping (permissive)
+          −m → also skip within m° below the camera (more conservative)
+
+        This is a DIRECTIONAL rule, not a symmetric window: a pair with the arc
+        behind the camera (led < cam) is never skipped. Uses the recorded camera
+        angle (cam_view) so reverse sweeps stay correct; the returned cam_pos is
+        the raw configured value for membership tests."""
         keepout = self.keepout_deg(config)
-        if keepout <= 0:
-            return []
         bad = []
         for led_pos in config.led_axis.positions:
             for cam_pos in config.camera_axis.positions:
                 cam_view = self._cam_view_deg(cam_pos, config.camera_reverse)
-                if abs(motion.normalize_deg(cam_view - led_pos)) < keepout:
+                if motion.normalize_deg(led_pos - cam_view) > keepout:
                     bad.append((led_pos, cam_pos))
         return bad
 
@@ -181,10 +193,14 @@ class ScanController:
         Path(cfg.output_folder).mkdir(parents=True, exist_ok=True)
 
         try:
-            for led_pos in led_positions:
-                for cam_pos in cam_positions:
+            # Camera is the OUTER axis: it holds a position while the LED arc
+            # sweeps 0..(camera angle), then the camera advances and the arc
+            # resets to 0. This matches the physical scan and the occlusion rule
+            # (the arc is skipped wherever it would lead the camera).
+            for cam_pos in cam_positions:
+                for led_pos in led_positions:
                     if (led_pos, cam_pos) in occluded:
-                        continue  # LED arc blocks the lens here — skip
+                        continue  # LED arc leads the camera here — skip
 
                     # Reverse (anti-clockwise) camera arc: command the camera
                     # motor to the negative angle so it sweeps CCW, but record and

@@ -292,10 +292,10 @@
           Precise positioning (encoder closed-loop)
         </label>
         <label class="inline-label">
-          Camera keep-out (°):
-          <input type="number" id="scan-keepout" value="0" min="0" max="90" step="0.5"
+          LED-arc lead margin (°):
+          <input type="number" id="scan-keepout" value="0" min="-90" max="90" step="0.5"
                  style="width:70px;margin-left:6px;"
-                 title="Refuse the scan if the LED arc would block the lens: any position with |θcam − θled| below this. 0 = guard off." />
+                 title="Skip positions where the LED arc leads the camera and blocks the lens: normalize(θled − θcam) > this. 0 = capture only led ≤ cam; positive tolerates the arc leading; negative is stricter." />
         </label>
       </div>
 
@@ -308,7 +308,7 @@
       <!-- Skipped positions (LED arc occludes the lens) -->
       <details id="scan-skipped-box" style="display:none;margin-top:8px;">
         <summary style="font-size:12px;color:var(--yellow);cursor:pointer;">
-          <span id="scan-skipped-count">0</span> position(s) skipped — LED arc blocks the lens (within keep-out)
+          <span id="scan-skipped-count">0</span> position(s) skipped — LED arc leads the camera and blocks the lens
         </summary>
         <div id="scan-skipped-list"
              style="margin-top:6px;font-size:11px;color:var(--text-dim);max-height:180px;overflow:auto;
