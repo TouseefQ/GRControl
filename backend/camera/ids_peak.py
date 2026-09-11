@@ -8,7 +8,6 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
-import json
 
 log = logging.getLogger(__name__)
 # IMPORTANT: single worker. Every IDS peak SDK call — Library.Initialize(), open,
@@ -732,11 +731,6 @@ class IDSCamera:
                 pil_img.save(str(path), format=fmt_map.get(fmt, "PNG"), **save_kw)
             else:
                 self._save_image(ipl_image, str(path), fmt)
-
-        # Save sidecar metadata JSON
-        meta_path = path.with_suffix(".json")
-        with open(meta_path, "w") as f:
-            json.dump(metadata, f, indent=2)
 
         log.info("Image saved: %s", path)
         return str(path)

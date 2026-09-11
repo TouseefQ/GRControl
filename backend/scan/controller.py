@@ -14,8 +14,10 @@ The controller is decoupled from the WebSocket layer — it calls async
 callbacks that the main app wires up.
 """
 import asyncio
+import json
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Awaitable, Optional
@@ -163,6 +165,7 @@ class ScanController:
 
     async def _run_scan(self):
         cfg = self._config
+        scan_start = datetime.now()
         led_positions = cfg.led_axis.positions
         cam_positions = cfg.camera_axis.positions
         active_leds = [i for i, en in enumerate(cfg.led_pattern.enabled) if en]
@@ -186,7 +189,29 @@ class ScanController:
         # Ensure output folder exists
         Path(cfg.output_folder).mkdir(parents=True, exist_ok=True)
 
+        # Initialized here so the finally block can always reference them.
+        cam_info: dict = {}
+        scan_cfg_dict: dict = {}
+        _scan_records: dict = {}
+
         try:
+            # Snapshot camera settings (exposure, gain, format, …) once for the
+            # scan-level JSON. The camera module already reads these at capture time
+            # but collecting them here keeps them in one place at scan start.
+            if self._camera and hasattr(self._camera, "get_info"):
+                try:
+                    cam_info = await self._camera.get_info() or {}
+                except Exception as _e:
+                    log.warning("Could not read camera info for scan JSON: %s", _e)
+            pf = cam_info.get("pixel_format") or ""
+            _m = re.match(r"Bayer[RGB]{2}(\d+)", pf)
+            if _m:
+                cam_info["bit_depth"] = int(_m.group(1))
+
+            scan_cfg_dict = cfg.model_dump()
+            scan_cfg_dict["led_positions"] = cfg.led_axis.positions
+            scan_cfg_dict["camera_positions"] = cfg.camera_axis.positions
+
             # Camera is the OUTER axis: it holds a position while the LED arc
             # sweeps 0..(camera angle), then the camera advances and the arc
             # resets to 0. This matches the physical scan and the occlusion rule
@@ -236,6 +261,14 @@ class ScanController:
                         saved_path = await self._camera.capture(
                             filename, cfg.image_format, metadata
                         )
+                        # Store per-image metadata in the scan record. The camera
+                        # module mutates `metadata` in-place (adds pixel_format,
+                        # raw_bayer, bit_depth, preview_png for TIFF), so reading
+                        # it here captures those camera-level fields too.
+                        img_key = os.path.basename(filename)
+                        _scan_records[img_key] = metadata
+                        if not saved_path:
+                            metadata["capture_failed"] = True
 
                         # Turn LED off
                         await self._esp.send_raw(cmd_led_set(led_idx, 0, 0))
@@ -267,6 +300,26 @@ class ScanController:
             self._progress.running = False
             self._progress.paused = False
             await self._emit_progress()
+            # Write a single scan-level JSON: settings once + all per-image records.
+            scan_json = os.path.join(
+                cfg.output_folder,
+                f"scan_{scan_start.strftime('%Y%m%d_%H%M%S')}.json",
+            )
+            try:
+                with open(scan_json, "w") as _f:
+                    json.dump(
+                        {
+                            "scan_start_time": scan_start.isoformat(),
+                            "camera_settings": cam_info,
+                            "scan_config": scan_cfg_dict,
+                            "images": _scan_records,
+                        },
+                        _f,
+                        indent=2,
+                    )
+                log.info("Scan JSON written: %s", scan_json)
+            except Exception as e:
+                log.error("Scan JSON write failed: %s", e)
 
     async def _move_to(self, led_pos: float, cam_pos: float, cfg: ScanConfig):
         self._move_done_motor1.clear()
