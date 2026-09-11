@@ -337,10 +337,9 @@ static bool pca_write_reg(uint8_t reg, uint8_t val) {
 void pca_begin() {
   pca_write_reg(PCA9685_MODE1, 0x00);   // clear SLEEP, wake up
   delay(1);
-  // OUTDRV=1 (totem-pole) + INVRT=1 (bit4). LEDs are common-anode: anode→V+,
-  // cathode→PWM output, so the channel sinks and LED-ON = output LOW. INVRT
-  // makes full-off→HIGH (LED off) and brightness scale the right way.
-  pca_write_reg(PCA9685_MODE2, 0x14);
+  // OUTDRV=1 (totem-pole), INVRT=0. MOSFETs are N-channel active-high: gate
+  // HIGH → MOSFET on → LED on. brightness=255 → full duty → gate HIGH → LED on.
+  pca_write_reg(PCA9685_MODE2, 0x04);
   delay(1);
 }
 
